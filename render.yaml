@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: kdautoform
+    runtime: docker
+    plan: free
+    region: singapore
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: KD_CLOUD
+        value: "1"
+      - key: KD_HOST
+        value: 0.0.0.0

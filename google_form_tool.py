@@ -1347,7 +1347,7 @@ $("undoRates").addEventListener("click",undoRates);document.addEventListener("ke
 $("searchQuestions").addEventListener("input",filterQuestions);$("pageFilter").addEventListener("change",filterQuestions);
 $("testButton").addEventListener("click",()=>startJob(true));
 $("startButton").addEventListener("click",async()=>{if(activeJob()){try{state.job=await api("/api/jobs/"+state.job.id+"/stop",{});renderJob()}catch(error){toast(error.message)}}else startJob(false)});
-async function init(){const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";try{const info=await api("/api/state");state.forceCheck=info.force_check;if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ Python.","error")}renderSummary()}
+async function init(){const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";try{const info=await api("/api/state");state.forceCheck=info.force_check;$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ Python.","error")}renderSummary()}
 function lockAccess(message=""){
 clearInterval(state.autoTimer);clearTimeout(state.pollTimer);state.autoTimer=null;state.remaining=0;state.armed=false;state.job=null;state.schema=null;state.config={};state.scanId=null;
 $("workspaceApp").hidden=true;$("workspaceApp").inert=true;$("accessGate").hidden=false;document.body.classList.add("access-locked");
@@ -1574,8 +1574,9 @@ class WebStopRequested(Exception):
 
 
 class WebApplication:
-    def __init__(self, force_check=False):
+    def __init__(self, force_check=False, headless_only=False):
         import threading
+        self.headless_only = headless_only
         self.lock = threading.RLock()
         self.scans, self.jobs = {}, {}
         self.token = secrets.token_urlsafe(32)
@@ -1587,6 +1588,11 @@ class WebApplication:
         scan_id = secrets.token_hex(8)
         state = {"id": scan_id, "status": "scanning", "url": url}
         with self.lock:
+            if self.headless_only and (
+                any(item["status"] == "scanning" for item in self.scans.values())
+                or any(item["status"] in ("queued", "running", "stopping") for item in self.jobs.values())
+            ):
+                raise FormError("Máy chủ đang đọc hoặc điền một form. Vui lòng chờ hoàn tất rồi thử lại.")
             self.scans[scan_id] = state
         def worker():
             try:
@@ -1641,12 +1647,14 @@ class WebApplication:
                "total": 1 if mode == "check" else count, "processed": 0, "confirmed": 0,
                "current_page": 0, "current_question": "", "events": [], "counts": {},
                "schema": state["schema"], "config": config, "delay": float(delay),
-               "headless": bool(payload.get("headless", True)), "stop_event": threading.Event(),
+               "headless": self.headless_only or bool(payload.get("headless", True)), "stop_event": threading.Event(),
                "created_at": time.time(), "updated_at": time.time(), "title": state["schema"]["title"],
                "seed": secrets.randbits(48), "access_key_id": payload.get("_key_id"),
                "access_key_hash": payload.get("_key_hash", ""), "exact": count > 0 and not state["schema"]["branching"]
                and not any(field["exclusive_columns"] for field in state["schema"]["fields"])}
         with self.lock:
+            if self.headless_only and any(item["status"] == "scanning" for item in self.scans.values()):
+                raise FormError("Máy chủ đang đọc form. Vui lòng chờ đọc xong rồi bắt đầu.")
             if any(item["status"] in ("queued", "running", "stopping") for item in self.jobs.values()):
                 raise FormError("Một lượt chạy đang hoạt động. Hãy dừng hoặc chờ hoàn tất.")
             self.jobs[job_id] = job
@@ -1742,10 +1750,44 @@ class WebApplication:
         return self.job_state(job_id)
 
 
-def start_web(port=8765, open_browser=True, force_check=False):
+def web_settings(port=None, host=None):
+    cloud = os.environ.get("KD_CLOUD", "").strip().lower() in ("1", "true", "yes") or os.environ.get("RENDER") == "true"
+    try:
+        port = int(port if port is not None else os.environ.get("PORT", "10000" if cloud else "8765"))
+    except (TypeError, ValueError) as exc:
+        raise FormError("PORT phải là số nguyên từ 0 đến 65535.") from exc
+    if not 0 <= port <= 65535:
+        raise FormError("PORT phải nằm từ 0 đến 65535.")
+    host = host or os.environ.get("KD_HOST") or ("0.0.0.0" if cloud else "127.0.0.1")
+    public_url = (os.environ.get("KD_PUBLIC_URL") or os.environ.get("RENDER_EXTERNAL_URL", "")).strip()
+    values = [public_url] + os.environ.get("KD_ALLOWED_ORIGINS", "").split(",")
+    origins = set()
+    for value in values:
+        value = value.strip().rstrip("/")
+        if not value:
+            continue
+        try:
+            parts = urlsplit(value)
+            valid = (parts.scheme in ("http", "https") and parts.hostname and not parts.username
+                     and not parts.password and not parts.path and not parts.query and not parts.fragment)
+            _ = parts.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise FormError("KD_PUBLIC_URL và KD_ALLOWED_ORIGINS cần có dạng https://ten-web.example, không có đường dẫn.")
+        origins.add(value)
+    if cloud and not origins:
+        raise FormError("Thiếu URL công khai. Trên Render dùng RENDER_EXTERNAL_URL tự cấp; nơi khác đặt KD_PUBLIC_URL.")
+    if cloud and not any(item["enabled"] for item in live_settings()["keys"].values()):
+        raise FormError("Cần ít nhất một key đang bật trước khi triển khai.")
+    return {"cloud": cloud, "host": host, "port": port, "public_url": public_url,
+            "origins": origins, "secure_cookie": bool(origins) and all(value.startswith("https://") for value in origins)}
+
+
+def create_web_server(port=None, force_check=False, host=None):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    import webbrowser
-    app = WebApplication(force_check=force_check)
+    settings = web_settings(port, host)
+    app = WebApplication(force_check=force_check, headless_only=settings["cloud"])
     access = AccessSessions()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -1763,6 +1805,10 @@ def start_web(port=8765, open_browser=True, force_check=False):
             self.end_headers()
             self.wfile.write(body)
 
+        def access_cookie(self, token, max_age):
+            suffix = "; Secure" if settings["secure_cookie"] else ""
+            return f"kd_access={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict{suffix}"
+
         def require_access(self):
             session = access.current(self.headers.get("Cookie"))
             if session is None:
@@ -1779,6 +1825,9 @@ def start_web(port=8765, open_browser=True, force_check=False):
         def do_GET(self):
             path = urlsplit(self.path).path
             try:
+                if path == "/healthz":
+                    self.reply(200, {"ok": True, "name": "KDautoform"})
+                    return
                 if path == "/":
                     self.reply(200, live_settings()["html"].replace("__APP_TOKEN__", app.token), "text/html; charset=utf-8")
                     return
@@ -1791,7 +1840,7 @@ def start_web(port=8765, open_browser=True, force_check=False):
                 if session is None:
                     return
                 if path == "/api/state":
-                    self.reply(200, {"ok": True, "force_check": app.force_check, "version": "3.0", "name": "KDautoform"})
+                    self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only, "version": "3.1", "name": "KDautoform"})
                 elif path.startswith("/api/scans/"):
                     scan_id = path.rsplit("/", 1)[-1]
                     self.require_owner("scan", scan_id, session)
@@ -1824,7 +1873,9 @@ def start_web(port=8765, open_browser=True, force_check=False):
 
         def do_POST(self):
             origin = self.headers.get("Origin")
-            expected = {f"http://127.0.0.1:{self.server.server_port}", f"http://localhost:{self.server.server_port}"}
+            expected = set(settings["origins"])
+            if not settings["cloud"]:
+                expected.update((f"http://127.0.0.1:{self.server.server_port}", f"http://localhost:{self.server.server_port}"))
             if self.headers.get("X-Local-Token") != app.token or (origin and origin not in expected):
                 self.reply(403, {"error": "Phiên truy cập không hợp lệ. Tải lại giao diện."})
                 return
@@ -1846,14 +1897,14 @@ def start_web(port=8765, open_browser=True, force_check=False):
                                    headers={"Retry-After": str(retry)})
                     elif token:
                         self.reply(200, {"authenticated": True, "key_name": record["key_id"]},
-                                   headers={"Set-Cookie": f"kd_access={token}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict"})
+                                   headers={"Set-Cookie": self.access_cookie(token, 43200)})
                     else:
                         self.reply(401, {"error": "Key không đúng hoặc đã bị khóa. Vui lòng kiểm tra lại."})
                     return
                 if path == "/api/auth/logout":
                     access.logout(self.headers.get("Cookie"))
                     self.reply(200, {"authenticated": False}, headers={
-                        "Set-Cookie": "kd_access=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"})
+                        "Set-Cookie": self.access_cookie("", 0)})
                     return
                 session = self.require_access()
                 if session is None:
@@ -1878,14 +1929,31 @@ def start_web(port=8765, open_browser=True, force_check=False):
                 self.reply(400, {"error": str(exc)})
             except (BrokenPipeError, ConnectionResetError):
                 pass
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    url = f"http://127.0.0.1:{server.server_port}"
+    server = ThreadingHTTPServer((settings["host"], settings["port"]), Handler)
+    server.application = app
+    server.settings = settings
+    return server
+
+
+def start_web(port=None, open_browser=True, force_check=False, host=None):
+    import signal
+    import threading
+    import webbrowser
+    server = create_web_server(port, force_check, host)
+    app = server.application
+    url = server.settings["public_url"] or f"http://127.0.0.1:{server.server_port}"
     print(f"KDautoform đang chạy: {url}", flush=True)
     print("Nhấn Ctrl+C trong cửa sổ này để dừng máy chủ.", flush=True)
     if force_check:
         print("Chế độ kiểm tra: mọi lượt chạy sẽ dừng trước nút Gửi.", flush=True)
-    if open_browser:
+    print(f"Đang lắng nghe tại {server.settings['host']}:{server.server_port}", flush=True)
+    if open_browser and not server.settings["cloud"]:
         webbrowser.open(url)
+    previous_handler = None
+    if threading.current_thread() is threading.main_thread():
+        def stop_server(signum, frame):
+            raise KeyboardInterrupt
+        previous_handler = signal.signal(signal.SIGTERM, stop_server)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1894,7 +1962,8 @@ def start_web(port=8765, open_browser=True, force_check=False):
         for job in app.jobs.values():
             job["stop_event"].set()
         server.server_close()
-
+        if previous_handler is not None:
+            signal.signal(signal.SIGTERM, previous_handler)
 
 
 UX_PRINCIPLES = [['Phân cấp thị giác', 'Tiêu đề, số lượng, tỷ lệ và nút bắt đầu có cấp độ rõ ràng.'], ['Tính nhất quán', 'Dùng chung bảng màu đỏ, kiểu nút và cách trình bày câu hỏi.'], ['Căn chỉnh', 'Các trường nhập, nhãn và thẻ câu hỏi cùng một trục.'], ['Nhịp điệu khoảng cách', 'Khoảng cách được lặp lại giữa các nhóm thông tin.'], ['Nguyên lý gần nhau', 'Đáp án, thanh kéo và ô phần trăm nằm cùng một hàng.'], ['Khoảng trắng', 'Tách rõ thiết lập, câu hỏi, tóm tắt và liên hệ.'], ['Tương phản dễ đọc', 'Làm đậm chữ chức năng để giữ tương phản trên nền sáng.'], ['Thiết kế đáp ứng', 'Bố cục đổi thành một cột trên điện thoại.'], ['Định luật Fitts', 'Nút chính lớn, vùng chạm trên điện thoại được mở rộng.'], ['Định luật Hick', 'Chỉ giữ một hành động chính theo trạng thái hiện tại.'], ['Ngăn ngừa lỗi', 'Chặn chạy khi thiếu link, sai số lượng hoặc tỷ lệ chưa hợp lệ.'], ['Báo lỗi tại chỗ', 'Hiển thị tổng phần trăm và đánh dấu ngay câu chưa hợp lệ.'], ['Hiển thị trạng thái hệ thống', 'Có trạng thái đọc form, đếm ngược, trang đang điền và kết quả.'], ['Phản hồi ngay', 'Đổi tỷ lệ là cập nhật thanh phân bổ và tóm tắt tức thì.'], ['Quyền kiểm soát của người dùng', 'Cho tạm dừng tự chạy, dừng lượt đang chạy và chọn điền thử.'], ['Khả năng hoàn tác', 'Hoàn tác được thao tác ngẫu nhiên, cân bằng và sửa tỷ lệ.'], ['Nhận biết thay vì ghi nhớ', 'Hiển thị câu hỏi và đáp án thật, không buộc nhớ mã trường.'], ['Ngôn ngữ quen thuộc', 'Dùng nhãn tiếng Việt, phần trăm và số lượt dễ hiểu.'], ['Tiết lộ dần', 'Chỉ mở ô nội dung tự nhập khi chọn chế độ tương ứng.'], ['Thao tác trực tiếp', 'Có cả thanh kéo và ô số cho từng tỷ lệ.'], ['Khả năng tiếp cận', 'Có nhãn, đường dẫn bỏ qua, trạng thái live và focus bàn phím.'], ['Tôn trọng giảm chuyển động', 'Tắt hiệu ứng khi hệ thống yêu cầu giảm chuyển động.'], ['Giữ ngữ cảnh làm việc', 'Lưu link, số lượng, cấu hình đang sửa và lượt chạy hiện tại.'], ['Tìm kiếm và lọc', 'Tìm câu hỏi và lọc theo trang khi biểu mẫu dài.'], ['Xác nhận theo kết quả thật', 'Chỉ ghi nhận lượt gửi sau khi Google xác nhận lưu phản hồi.']]
@@ -1905,8 +1974,9 @@ def cli(argv=None):
         epilog="--count 0 chạy đến Ctrl+C. --check điền đến trang cuối nhưng không gửi. "
                "Form yêu cầu đăng nhập, tải tệp, CAPTCHA hoặc quy tắc chưa hỗ trợ sẽ báo dừng. "
                "Form phân nhánh được điền đầy đủ theo nhánh đã chọn.")
-    parser.add_argument("--web", action="store_true", help="Mở giao diện web màu đỏ tại localhost")
-    parser.add_argument("--port", type=int, default=8765, help="Cổng giao diện web")
+    parser.add_argument("--web", action="store_true", help="Mở giao diện web KDautoform")
+    parser.add_argument("--port", type=int, default=None, help="Cổng giao diện web; mặc định PORT hoặc 8765")
+    parser.add_argument("--host", help="Địa chỉ lắng nghe; mặc định localhost, hoặc 0.0.0.0 trên cloud")
     parser.add_argument("--no-open", action="store_true", help="Không tự mở giao diện")
     parser.add_argument("--ux-report", action="store_true", help="Xem các nguyên lý UI/UX đã áp dụng")
     key_commands = parser.add_mutually_exclusive_group()
@@ -1954,12 +2024,12 @@ def cli(argv=None):
             print(f"{index:02d}. {principle}: {implementation}")
         return 0
     if args.web:
-        if not 0 <= args.port <= 65535:
+        if args.port is not None and not 0 <= args.port <= 65535:
             parser.error("--port phải nằm từ 0 đến 65535.")
         try:
-            start_web(args.port, open_browser=not args.no_open, force_check=args.check)
+            start_web(args.port, open_browser=not args.no_open, force_check=args.check, host=args.host)
             return 0
-        except OSError as exc:
+        except (OSError, FormError) as exc:
             print("Không mở được giao diện: " + str(exc), file=sys.stderr)
             return 2
     log = None
