@@ -1,8 +1,10 @@
 # KDautoform
 
-Giao diện web và công cụ Python điền Google Form bằng dữ liệu giả để kiểm thử form bạn quản lý. Công cụ đọc các trang, câu hỏi, cho chỉnh tỷ lệ và tạo hồ sơ giả tiếng Việt.
+Giao diện web và công cụ Python tạo dữ liệu giả để kiểm thử form bạn quản lý. **Google Forms là chức năng chính**, giữ cách đọc toàn bộ các trang, điều chỉnh tỷ lệ từng câu và tạo hồ sơ giả tiếng Việt. Bản này thêm Microsoft Forms công khai, chế độ thử nghiệm cho form HTML tiêu chuẩn và xuất kết quả đã xác nhận sang SPSS `.sav`.
 
 ## Chạy trên máy Windows
+
+Dùng Python 3.11 trở lên (64-bit).
 
 ```powershell
 cd C:\Users\DELL\Desktop\toolggform
@@ -12,6 +14,55 @@ python google_form_tool.py --web
 
 Mở http://127.0.0.1:8765 để vào thẳng trang chủ và dùng miễn phí 10 lượt gửi, không cần key. Dùng `--web --check` để kiểm tra mọi trang mà chưa gửi phản hồi. Khi cần mở khóa không giới hạn lượt, chủ công cụ tạo key bằng `python google_form_tool.py --key-generate`.
 
+Giữ các file `google_form_tool.py`, `microsoft_forms.py`, `html_forms.py`, `spss_export.py` và `requirements.txt` cùng thư mục. `--setup` cài các thư viện trong requirements cùng Chromium; không chỉ sao chép riêng file Python chính sang máy khác.
+
+## Chọn loại biểu mẫu
+
+Trên web có ba lựa chọn: **Google Forms**, **Microsoft Forms** và **Form khác / HTML**. Chọn đúng loại trước khi dán link. Các loại được hỗ trợ dùng chung cấu hình tỷ lệ, nút ngẫu nhiên, hồ sơ tiếng Việt, điền thử, tiến độ, hạn mức miễn phí, key unlimited và xuất SPSS.
+
+| Loại | Phạm vi hỗ trợ |
+| --- | --- |
+| **Google Forms — chức năng chính** | Giữ các tính năng có sẵn: câu ngắn, đoạn văn, một/nhiều lựa chọn, danh sách, thang điểm, lưới, ngày/giờ; toàn bộ trang và nhánh được hỗ trợ; kiểm tra cấu trúc thay đổi; xác nhận kết quả trước khi ghi nhận thành công. |
+| **Microsoft Forms** | Link trả lời công khai trên miền Microsoft Forms; đọc toàn bộ câu hỏi và phần/trang; hỗ trợ câu chữ, chọn một/nhiều, danh sách, rating, NPS, ngày và bảng Likert đã được nhận diện. Form yêu cầu tài khoản, tải tệp, CAPTCHA hoặc kiểu/quy tắc chưa hỗ trợ sẽ báo dừng. |
+| **Form khác / HTML — thử nghiệm** | Form HTML chuẩn một trang, dùng điều khiển nhập liệu gốc của trình duyệt và gửi POST. Không bảo đảm chạy trên mọi website khảo sát; các website có giao diện hoặc quy trình riêng cần bộ kết nối tương ứng. |
+
+SPSS là phần mềm phân tích dữ liệu. Một “form dùng để chạy SPSS” có thể được tạo bằng Google Forms, Microsoft Forms hoặc website khác; chọn theo **địa chỉ và loại form thực tế**, sau đó tải `.sav`. File `.sav` không phải đường dẫn form có thể điền.
+
+Chế độ HTML thử nghiệm không chạy form đăng nhập/mật khẩu, thanh toán, tải tệp, CAPTCHA, widget tùy biến hoặc luồng nhiều trang. HTML beta không tự theo chuyển hướng: nếu gặp chuyển hướng, mở trang bằng trình duyệt rồi dán URL cuối cùng. Công cụ dừng khi không xác định chắc chắn câu hỏi, quy tắc hay kết quả gửi; không tự bỏ qua các câu chưa hỗ trợ.
+
+### Chạy bằng Terminal
+
+Mặc định `--provider auto` tự chọn Google Forms hoặc Microsoft Forms theo link. Với website khác, cần chọn rõ chế độ HTML thử nghiệm:
+
+```powershell
+python google_form_tool.py --url "LINK_GOOGLE_FORM" --provider google --count 10 --headless
+python google_form_tool.py --url "LINK_MICROSOFT_FORM" --provider microsoft --count 1 --check --headless
+python google_form_tool.py --url "https://website-cua-ban.example/khao-sat" --provider html --count 1 --check --headless
+```
+
+Thay các địa chỉ minh họa bằng link form bạn quản lý. `--check` điền thử và dừng trước nút Gửi; bỏ `--check` khi đã kiểm tra xong và muốn gửi thật. `--provider auto` không tự nhận mọi URL lạ là form HTML.
+
+## Xuất dữ liệu sang SPSS
+
+Trên web, sau khi có lượt gửi được xác nhận, dùng nút **Tải SPSS (.sav)** trong phần kết quả. File có thể chứa các lượt đã xác nhận tại thời điểm tải; các lượt đang điền hoặc chưa rõ kết quả không được thêm vào.
+
+Chạy một đợt hữu hạn từ Terminal và xuất khi hoàn tất:
+
+```powershell
+python google_form_tool.py --url "LINK_FORM_CUA_BAN" --count 10 --headless --spss-out ket_qua.sav
+```
+
+Nếu là form HTML, thêm `--provider html`. Sau đó mở SPSS, chọn **File > Open > Data**, tìm `ket_qua.sav`. Trong **Variable View**, xem tên biến, nhãn câu hỏi và nhãn giá trị; trong **Data View**, mỗi hàng là một lượt đã được xác nhận.
+
+- Câu một lựa chọn được mã hóa số kèm nhãn đáp án; thang điểm có nhãn số giữ giá trị gốc, kể cả điểm `0`.
+- Câu nhiều lựa chọn được tách thành các biến `0` = không chọn, `1` = đã chọn. Mỗi hàng lưới có biến riêng và nhãn chứa tên hàng.
+- Văn bản tiếng Việt được giữ nguyên. Ngày/giờ được xuất thành chuỗi ISO để giữ đúng giá trị; có thể chuyển kiểu ngày trong SPSS nếu cần tính toán theo ngày.
+- Câu hoặc trang bị bỏ qua do phân nhánh được để thiếu. Không đưa đáp án đã sinh sẵn cho nhánh không đi qua vào dữ liệu.
+- Điền thử, lần gửi chưa xác nhận và bản ghi xác nhận trùng không trở thành phản hồi trong file. File có ghi chú **dữ liệu mô phỏng**, không phải phản hồi thu thập từ người tham gia thật.
+- Một lần xuất tối đa 50.000 phản hồi, 2 triệu ô dữ liệu, 32 MiB văn bản và nhật ký 200 MiB. Giới hạn này bảo vệ RAM máy chủ; không giới hạn số lượt của key unlimited. Với đợt lớn, chia thành các đợt nhỏ để xuất.
+
+Giữ file `.sav` và nhật ký đã tải trước khi Render restart/deploy. SPSS xuất từ nhật ký trong phiên, không tự lưu file kết quả lâu dài vào PostgreSQL.
+
 ## Đưa lên GitHub
 
 Repository đã có remote `origin` và nhánh `main`:
@@ -19,12 +70,12 @@ Repository đã có remote `origin` và nhánh `main`:
 ```powershell
 cd C:\Users\DELL\Desktop\toolggform
 git status --short
-git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py tests/test_deployment.py tests/test_keys.py
-git commit -m "Add 10 free submissions and reusable unlimited keys"
+git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py microsoft_forms.py html_forms.py spss_export.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py
+git commit -m "Add form providers and SPSS exports"
 git push origin main
 ```
 
-Repository: https://github.com/khuongduy123txz-web/KDFillForm
+Repository: https://github.com/khuongduy123txz-web/KDAutoFillForm
 
 Nếu Git báo `rejected (fetch first)`, chạy `git pull --rebase origin main` rồi đẩy lại; nếu có xung đột, giải quyết trước khi tiếp tục. Không dùng `--force`. File `tests/test_batch.py` cũ không thuộc bộ kiểm tra triển khai mới.
 
@@ -33,7 +84,7 @@ Nếu Git báo `rejected (fetch first)`, chạy `git pull --rebase origin main` 
 Trước khi deploy, cấu hình kho PostgreSQL theo mục **Kho key bền vững cho Render** bên dưới. Cách khuyến nghị: dùng Blueprint để Render đọc sẵn `render.yaml`.
 
 1. Truy cập https://dashboard.render.com và đăng nhập bằng GitHub.
-2. Chọn **New > Blueprint**, kết nối repository **KDFillForm**. Nếu chưa thấy repo, cấp quyền cho Render truy cập repo đó trong phần cài đặt GitHub của Render.
+2. Chọn **New > Blueprint**, kết nối repository **KDAutoFillForm**. Nếu chưa thấy repo, cấp quyền cho Render truy cập repo đó trong phần cài đặt GitHub của Render.
 3. Chọn nhánh **main**, file Blueprint **render.yaml** ở thư mục gốc. Đặt tên Blueprint, ví dụ **KDautoform**.
 4. Xem lại service **kdautoform**, runtime **Docker**, compute plan **Free**. Chỉ tiếp tục khi màn hình thể hiện gói miễn phí; không thêm database hoặc dịch vụ trả phí.
 5. Nhập chuỗi PostgreSQL vào ô **KD_DATABASE_URL**, rồi chọn **Deploy Blueprint** hoặc **Apply** theo giao diện hiện tại. Render cài Python, Playwright, Chromium và các thư viện Linux từ Dockerfile.
@@ -45,7 +96,7 @@ Nếu đã tạo Web Service bằng tay, dùng cấu hình sau thay cho tạo Bl
 
 | Mục trên Render | Giá trị |
 | --- | --- |
-| Repository | `khuongduy123txz-web/KDFillForm` |
+| Repository | `khuongduy123txz-web/KDAutoFillForm` |
 | Branch | `main` |
 | Root Directory | Để trống |
 | Language / Runtime | `Docker` |
@@ -86,7 +137,7 @@ Không cần đặt key người dùng vào biến môi trường. CSDL lưu mã
 Website mở thẳng trang chủ. Mỗi trình duyệt được **10 lượt gửi miễn phí cộng dồn**, không cần tài khoản hoặc key. Một đợt gửi 5 phản hồi sử dụng 5 lượt; có thể chia thành nhiều đợt cho đến khi hết hạn mức.
 
 - **Đọc form và Điền thử không trừ lượt.** Lỗi xảy ra trước thao tác gửi cũng không trừ lượt.
-- Máy chủ trừ một lượt ngay trước mỗi thao tác gửi tới Google. Nếu mất kết nối hoặc chưa xác nhận được kết quả sau khi đã bắt đầu gửi, lượt đó vẫn được tính vì Google có thể đã lưu phản hồi.
+- Máy chủ trừ một lượt ngay trước mỗi thao tác gửi tới dịch vụ biểu mẫu. Nếu mất kết nối hoặc chưa xác nhận được kết quả sau khi đã bắt đầu gửi, lượt đó vẫn được tính vì dịch vụ có thể đã lưu phản hồi. Hạn mức dùng chung cho các loại form, không có thêm 10 lượt riêng khi đổi tab.
 - Số lượng gửi miễn phí phải từ 1 đến số lượt còn lại. Số lượng `0` để chạy liên tục chỉ dành cho key unlimited.
 - Hết 10 lượt thì khóa thao tác bắt đầu lượt mới và hiển thị phần mua key. Người dùng vẫn theo dõi lượt đang chạy, dừng và tải nhật ký được.
 - **F5, Ctrl+R, mở lại URL và đăng xuất không đặt lại 10 lượt.** Cookie khách `kd_guest` được lưu tối đa 365 ngày; máy chủ lưu mã băm nhận dạng khách và số lượt đã dùng trong SQLite/PostgreSQL.
@@ -157,7 +208,7 @@ KD_KEY_DB_PATH=D:/KDautoform/data/access_keys.sqlite3
 KD_KEY_EXPORT_DIR=D:/KDautoform/private_keys
 ```
 
-Trong `google_form_tool.py`, tìm comment **HẠN MỨC MIỄN PHÍ** và dòng `FREE_LIMIT = 10` để đổi số lượt miễn phí. Hạn mức được máy chủ kiểm tra; không chỉ dựa vào ô số lượng trên giao diện.
+Trong `google_form_tool.py`, tìm comment **HẠN MỨC MIỄN PHÍ** và dòng `FREE_LIMIT = 10` để đổi số lượt miễn phí. Khi đổi hạn mức, cập nhật cả các nhãn giới thiệu đang ghi “10 lượt” trong HTML và README để nội dung khớp với cấu hình. Hạn mức được máy chủ kiểm tra; không chỉ dựa vào ô số lượng trên giao diện.
 
 Tìm comment **MUA KEY** trong phần HTML nhúng để sửa nội dung giá `30.000đ/key` và các đường dẫn Facebook/Zalo. Đây là nội dung giới thiệu, không tự tạo key hoặc xác nhận thanh toán.
 
@@ -258,12 +309,27 @@ Giữ CSDL hiện tại qua các lần deploy. Xóa CSDL hoặc khôi phục b�
 
 ## Kiểm tra tại máy
 
-Kiểm tra HTTP, xác thực, URL công khai và chế độ trình duyệt cloud, không gửi Google Form:
+Kiểm tra HTTP, key, hạn mức, hồi quy Google Forms, các bộ đọc form và file SPSS, không gửi form thật:
 
 ```powershell
 python -B -m unittest discover -s tests -p test_deployment.py -v
 python -B -m unittest discover -s tests -p test_keys.py -v
+python -B -m unittest discover -s tests -p test_google_regression.py -v
+python -B -m unittest discover -s tests -p test_microsoft_forms.py -v
+python -B -m unittest discover -s tests -p test_html_forms.py -v
+python -B -m unittest discover -s tests -p test_spss_export.py -v
+python -B -m unittest discover -s tests -p test_provider_exports.py -v
 ```
+
+Các kiểm thử vòng đọc/ghi `.sav` cần cài đủ `requirements.txt`. Bật các bài kiểm thử trình duyệt bằng fixture mô phỏng khi Chromium đã được cài:
+
+```powershell
+$env:KD_BROWSER_TESTS="1"
+python -B -m unittest discover -s tests -p test_microsoft_forms.py -v
+python -B -m unittest discover -s tests -p test_html_forms.py -v
+```
+
+Fixture mô phỏng kiểm tra khả năng đọc/điền và xác nhận kết quả trong môi trường kiểm thử. Chúng không bảo đảm mọi website hoặc mọi thay đổi giao diện trong tương lai đều tương thích. Không chạy toàn bộ `tests/` bằng mẫu mặc định vì file `test_batch.py` cũ thuộc cấu trúc dự án trước đây.
 
 Nếu Docker Desktop đã bật, dùng Linux containers và `.env` đã có `KD_DATABASE_URL`:
 
@@ -278,7 +344,7 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 
 - Render Free có 512 MB RAM, tự ngủ sau 15 phút không có truy cập. Chromium có thể vượt RAM với form nặng. Nếu log có `Out of memory`/`OOM`, thử form nhỏ hoặc chuyển máy chủ có nhiều RAM hơn. Không bảo đảm chạy liên tục nhiều lượt trên gói miễn phí.
 - Lượt chạy, phiên mở khóa, cấu hình đang chỉnh ở RAM; nhật ký ở thư mục tạm. Chúng không được bảo toàn khi service ngủ, restart hoặc deploy. Trạng thái key và số lượt miễn phí được giữ trong PostgreSQL riêng. Sau restart, nhập lại cùng key unlimited còn hiệu lực. Tải nhật ký trước khi rời phiên; tránh cập nhật source/key lúc đang chạy.
-- Nếu service dừng giữa lúc gửi, kiểm tra phản hồi đã lưu trong Google Form trước khi bắt đầu lại để tránh gửi trùng. Job web không tự tiếp tục sau restart.
+- Nếu service dừng giữa lúc gửi, kiểm tra phản hồi đã lưu trong form nguồn trước khi bắt đầu lại để tránh gửi trùng. Job web không tự tiếp tục sau restart.
 - Cloud không hiện cửa sổ Chromium trên máy người dùng. Theo dõi tiến độ qua web và nhật ký.
 - Form có đăng nhập, tải tệp, CAPTCHA hoặc quy tắc chưa hỗ trợ sẽ báo dừng.
 
@@ -295,6 +361,11 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 | F5 vẫn hiện giao diện yêu cầu key của bản cũ | Kiểm tra Render đã deploy thành công commit mới. Bản mới luôn vào trang chủ, giữ số lượt miễn phí và giữ phiên unlimited còn hạn. Sau restart hoặc hết phiên, nhập lại cùng key. |
 | Cloud cần KD_DATABASE_URL | Thêm chuỗi PostgreSQL vào Render Environment; không dùng SQLite tạm trên Render Free. |
 | Không mở được Chromium | Runtime cần là Docker, Dockerfile đã chạy `playwright install --with-deps --only-shell chromium`. |
+| Microsoft Forms yêu cầu đăng nhập | Dùng link trả lời công khai mà người quản lý cho phép mọi người trả lời. Công cụ không vượt đăng nhập hoặc hạn chế của tổ chức. |
+| Form khác báo chưa hỗ trợ | Chọn đúng chế độ HTML thử nghiệm. Website dùng widget, luồng nhiều trang hoặc cơ chế gửi riêng cần bộ kết nối riêng; không đổi URL lạ thành Google Form. |
+| Không có nút tải SPSS hoặc chưa có lượt xác nhận | Điền thử và lượt chưa rõ kết quả không được xuất thành dữ liệu. Chờ có phản hồi đã xác nhận rồi tải. |
+| Xuất SPSS báo thiếu thư viện | Chạy `python -m pip install -r requirements.txt`; khi cloud dùng Docker, deploy lại image có requirements mới. |
+| Xuất SPSS vượt giới hạn | Chia số lượt thành đợt nhỏ hơn; giới hạn xuất bảo vệ RAM và không làm mất hiệu lực key unlimited. |
 | Web khởi động chậm sau khi để lâu | Gói Free đang thức dậy; đợi khởi động xong. |
 
 ## Tài liệu chính thức
@@ -304,3 +375,6 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 - [Render Blueprint](https://render.com/docs/blueprint-spec)
 - [Render Free](https://render.com/docs/free)
 - [Playwright](https://playwright.dev/python/docs/browsers)
+- [Microsoft Forms: ai có thể trả lời](https://support.microsoft.com/en-us/forms/choose-who-can-fill-out-a-form-or-quiz)
+- [Microsoft Forms: phân nhánh](https://support.microsoft.com/en-gb/forms/use-branching-logic-in-microsoft-forms)
+- [pyreadstat: đọc/ghi SPSS](https://ofajardo.github.io/pyreadstat_documentation/_build/html/index.html)

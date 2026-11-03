@@ -3,3 +3,6 @@
 !.dockerignore
 !requirements.txt
 !google_form_tool.py
+!microsoft_forms.py
+!spss_export.py
+!html_forms.py

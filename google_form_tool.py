@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
@@ -19,7 +19,7 @@ import time
 import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 
-FORM_URL = ""  # DÁN LINK GOOGLE FORM CỦA BẠN VÀO ĐÂY
+FORM_URL = ""  # DÁN LINK GOOGLE FORMS HOẶC MICROSOFT FORMS CỦA BẠN VÀO ĐÂY
 
 
 # KEY CŨ: chỉ nhập sang SQLite một lần. Tạo key mới bằng --key-generate, không dán key thật vào code.
@@ -56,16 +56,28 @@ def get_at(value, index, default=None):
     return value[index] if isinstance(value, list) and len(value) > index else default
 
 
-def form_link(value, resolved=False):
+def form_link(value, resolved=False, allow_generic=False):
     value = value.strip()
+    from microsoft_forms import is_microsoft_url, normalize_microsoft_url
+    if is_microsoft_url(value):
+        try:
+            return normalize_microsoft_url(value, resolved=resolved)
+        except ValueError as exc:
+            raise FormError(str(exc)) from exc
     parts = urlsplit(value)
     if parts.scheme != "https" or parts.username or parts.password:
-        raise FormError("Cần đường dẫn HTTPS Google Form.")
+        raise FormError("Cần đường dẫn HTTPS của Google Forms hoặc Microsoft Forms.")
     host = parts.netloc.lower()
     if host in ("forms.gle", "forms.google.com") and not resolved:
         return value
     if host != "docs.google.com":
-        raise FormError("Đường dẫn phải thuộc docs.google.com hoặc forms.gle.")
+        if allow_generic:
+            from html_forms import normalize_html_url
+            try:
+                return normalize_html_url(value, resolved=resolved)
+            except ValueError as exc:
+                raise FormError(str(exc)) from exc
+        raise FormError("Chỉ hỗ trợ link Google Forms hoặc Microsoft Forms công khai.")
     match = re.fullmatch(r"/forms/(?:u/\d+/)?d/(?:e/)?[A-Za-z0-9_-]+/(viewform|formResponse|edit)/?", parts.path)
     if not match:
         raise FormError("Link không phải trang điền Google Form công khai.")
@@ -147,7 +159,7 @@ def parse_schema(data, url):
     ids = [field["id"] for field in fields]
     if not fields or len(set(ids)) != len(ids):
         raise FormError("Cấu trúc câu hỏi trống hoặc trùng mã.")
-    return {"url": url, "title": str(get_at(form, 8, "Google Form")),
+    return {"url": url, "provider": "google", "title": str(get_at(form, 8, "Google Form")),
             "fields": fields, "pages": pages, "question_count": len(question_ids),
             "branching": branching, "confirmation": str(get_at(get_at(form, 2, []), 0, "") or "")}
 
@@ -1368,6 +1380,21 @@ class FormBrowser:
         except Exception as exc:
             raise FormError("Chưa xác định phản hồi đã lưu hay chưa. Không tự gửi lại. " + str(exc)) from exc
 
+def form_browser(url):
+    from microsoft_forms import is_microsoft_url, create_microsoft_browser
+    if is_microsoft_url(url):
+        return create_microsoft_browser(FormBrowser, FormError, normalized, plain, fingerprint, validate_answers)
+    if urlsplit(url).hostname not in ("docs.google.com", "forms.gle", "forms.google.com"):
+        from html_forms import create_html_browser
+        return create_html_browser(FormBrowser, FormError, normalized, plain, fingerprint, validate_answers)
+    return FormBrowser
+
+
+def spss_available():
+    from importlib.util import find_spec
+    return find_spec("pyreadstat") is not None and find_spec("pandas") is not None
+
+
 class RunLog:
     def __init__(self, path):
         self.path = Path(path)
@@ -1392,7 +1419,7 @@ class RunLog:
             if "index" in event and event.get("event") in ("started", "confirmed"):
                 states[event["index"]] = event["event"]
         if any(status == "started" for status in states.values()):
-            raise FormError("Có lượt đã bấm Gửi nhưng chưa rõ kết quả. Kiểm tra Google Form và nhật ký trước.")
+            raise FormError("Có lượt đã bấm Gửi nhưng chưa rõ kết quả. Kiểm tra biểu mẫu và nhật ký trước.")
         completed = set(states)
         if completed != set(range(1, len(completed) + 1)):
             raise FormError("Nhật ký không liên tục; cần kiểm tra trước khi gửi tiếp.")
@@ -1414,7 +1441,8 @@ def inspect_form(schema, sampler):
 
 
 def setup():
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright>=1.50,<2"])
+    requirements = Path(__file__).resolve().with_name("requirements.txt")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(requirements)])
     subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
 
 
@@ -1424,8 +1452,8 @@ WEB_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light">
-<meta name="description" content="KDautoform: điền Google Form với dữ liệu mô phỏng, tùy chỉnh tỷ lệ, 10 lượt miễn phí. Mở khóa unlimited 30.000đ/key.">
-<title>KDautoform — Điền form theo tỷ lệ của bạn</title>
+<meta name="description" content="KDautoform: Google Forms và Microsoft Forms, tùy chỉnh tỷ lệ, xuất SPSS .sav, 10 lượt miễn phí. Mở khóa unlimited 30.000đ/key.">
+<title>KDautoform — Google Forms, Microsoft Forms &amp; SPSS</title>
 <style>
 :root{--red:#c52c38;--red-deep:#a71e2a;--red-soft:#fff0ef;--ink:#282128;--muted:#776870;--line:#eee6e6;--paper:#fff;--canvas:#fbf8f7;--green:#236f58;--radius:20px}
 *{box-sizing:border-box}body{margin:0;background:var(--canvas);font:14px/1.55 "Segoe UI",Arial,sans-serif;color:var(--ink);-webkit-font-smoothing:antialiased}button,input,select,textarea{font:inherit}button,a,input,select,textarea{-webkit-tap-highlight-color:transparent}button,a{touch-action:manipulation}button{cursor:pointer}button:disabled{cursor:not-allowed;opacity:.45}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #efa0a4;outline-offset:3px}a{color:inherit;text-decoration:none}button{border:0}button svg{flex-shrink:0}svg.icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}.defs{position:absolute;width:0;height:0;overflow:hidden}
@@ -1451,6 +1479,8 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 @media(max-width:790px){.header-links{display:none}.intro{display:grid;grid-template-columns:minmax(0,1fr) 235px;gap:24px;margin-bottom:24px}.hero-copy h1{font-size:35px;letter-spacing:-1.2px}.hero-offer{width:100%;padding:21px}.hero-offer h2{font-size:29px}.offer-label{font-size:8px}.offer-price{font-size:30px}.hero-actions{flex-wrap:wrap;gap:12px;margin-top:18px}.hero-actions>span{font-size:10px}.hero-start{font-size:11px;padding:12px 14px}.usage-strip{flex-wrap:wrap;padding:16px 18px;gap:12px}.usage-heading{flex-basis:calc(100% - 150px)}.usage-meter{min-width:105px}.usage-strip>button{margin-left:53px;min-height:44px}.how-it-works{gap:9px}.how-it-works li{padding:0;gap:8px}.how-it-works li+li{padding-left:12px}.how-it-works strong{font-size:10px}.how-it-works small{font-size:9px}.how-it-works li>span{font-size:21px}.access-card h2{font-size:25px}}
 @media(max-width:550px){.intro{grid-template-columns:1fr;gap:23px}.hero-copy h1{font-size:40px;line-height:1.2}.hero-copy p{font-size:13px}.hero-offer{display:grid;grid-template-columns:1fr auto;column-gap:10px;padding:21px}.offer-label{grid-column:1/-1;font-size:8px}.hero-offer h2{margin-top:13px;font-size:29px}.hero-offer p{grid-column:1;font-size:10px}.offer-price{grid-column:2;grid-row:2/4;margin:15px 0 0;font-size:29px;align-self:center}.offer-price span{display:block;text-align:right;font-size:11px;margin-top:4px}.hero-offer button{grid-column:1/-1;margin-top:14px}.hero-offer small{grid-column:1/-1;font-size:9px}.usage-heading{flex-basis:100%}.usage-meter{flex:1;margin-left:53px;min-width:0}.usage-meter span{text-align:left}.usage-strip>button{margin-left:0;padding:10px;font-size:10px}.how-it-works{margin-bottom:22px;grid-template-columns:1fr;gap:13px}.how-it-works li,.how-it-works li+li{border:0;padding:0 3px;gap:12px}.how-it-works strong{font-size:12px}.how-it-works small{font-size:10px}.how-it-works li>span{font-size:20px}.hero-actions>span{font-size:11px}.access-gate{justify-content:flex-start;padding-top:25px}.access-brand{margin-bottom:19px}.access-description{font-size:12px}.access-help{margin-top:20px}.contact-footer .footer-copy strong{color:#553740;font-size:13px}.usage-heading strong{font-size:12px}.usage-heading p{font-size:10px}.summary-top p,.summary-row,.summary-row strong,.toggle-line,.test-note,.test-run,.job-detail,.event{color:#755560}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+.provider-chips{display:flex;gap:7px;flex-wrap:wrap;margin:-4px 0 18px}.provider-chips span{font-size:10px;border-radius:20px;padding:4px 9px;border:1px solid #ecdadd;background:#fffbfa;color:#825a64}.provider-chips span:last-child{color:#236f58;background:#f0f8f3;border-color:#d9eade}.spss-download{display:flex;margin-top:11px;font-weight:650}.spss-download[aria-busy=true]{opacity:.6;pointer-events:none}.spss-note{font-size:10px;line-height:1.7;color:#78606b;margin:7px 0 0}@media(max-width:550px){.input-grid{grid-template-columns:1fr}.quantity{max-width:200px}.provider-chips{gap:5px}.provider-chips span{font-size:9px}}
+.provider-section{margin:0 0 22px}.provider-tabs{display:grid;grid-template-columns:1.25fr 1fr 1fr;gap:9px}.provider-tabs button{text-align:left;padding:15px 18px;border:1px solid #e7d7da;background:white;border-radius:12px;color:#775360;min-height:66px}.provider-tabs strong{display:block;font-size:13px;letter-spacing:-.15px}.provider-tabs small{display:block;font-size:10px;margin-top:4px;color:#88717b}.provider-tabs button[aria-selected=true]{background:#fff0ef;border-color:#ca6972;color:#a81f2e;box-shadow:inset 0 2px 0 #c52c38}.provider-panel{padding:13px 17px 0}.provider-panel strong{font-size:12px;color:#71545e}.provider-panel p{font-size:11px;line-height:1.75;margin:5px 0 0;color:#78606a;max-width:900px}.provider-tabs button:hover:not(:disabled){border-color:#c66370}@media(max-width:550px){.provider-tabs{gap:5px;grid-template-columns:1.1fr 1fr 1fr}.provider-tabs button{padding:12px 9px;min-height:72px}.provider-tabs strong{font-size:11px}.provider-tabs small{font-size:9px;line-height:1.5}.provider-panel{padding:12px 5px 0}.provider-panel strong{font-size:11px}.provider-panel p{font-size:10px}}
 </style>
 </head>
 <body>
@@ -1490,7 +1520,7 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <div class="access-help">Mua key unlimited · 30.000đ/key</div>
 <div class="access-contacts"><a class="contact-link" href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span>0343415673</a><a class="contact-link" href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span>Facebook</a></div>
 </div>
-<div class="access-foot">KDautoform · Công cụ điền Google Form</div>
+<div class="access-foot">KDautoform · Google Forms &amp; Microsoft Forms</div>
 </section>
 <div id="workspaceApp">
 
@@ -1499,14 +1529,16 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <nav class="header-links" aria-label="Điều hướng"><a href="#setupTitle">Công cụ</a><a href="#contact">Liên hệ</a></nav><div class="contact-nav"><button id="logoutKey" type="button" class="contact-link key-session" aria-label="Nhập key unlimited"><svg class="icon"><use href="#i-shield"/></svg><span>Nhập key</span></button><a class="contact-link" href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span><span class="phone-label">0343415673</span></a><a class="contact-link" href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span><span>Facebook</span></a></div>
 </div></header>
 <main id="mainContent" tabindex="-1">
-<section class="intro"><div class="hero-copy"><div class="eyebrow">GOOGLE FORMS · DỮ LIỆU MÔ PHỎNG</div><h1>Một đường link.<br><span>Chủ động mọi tỷ lệ.</span></h1><p>Đọc toàn bộ biểu mẫu, tùy chỉnh từng đáp án và theo dõi tiến trình ở một nơi. Bắt đầu ngay với 10 lượt miễn phí.</p><div class="hero-actions"><a class="hero-start" href="#setupTitle">Dùng thử miễn phí <svg class="icon"><use href="#i-arrow"/></svg></a><span>Không cần tài khoản</span></div></div><aside class="hero-offer" aria-label="Gói unlimited"><div class="offer-label"><svg class="icon"><use href="#i-spark"/></svg>THÊM TỰ DO CHO MỖI LƯỢT CHẠY</div><h2>Unlimited.</h2><p>Một key. Không giới hạn lượt điền.</p><div class="offer-price">30.000<span>đ / key</span></div><button type="button" id="heroUpgrade">Mua key &amp; mở khóa <svg class="icon"><use href="#i-arrow"/></svg></button><small>Liên hệ trực tiếp qua Facebook hoặc Zalo</small></aside></section>
+<section class="intro"><div class="hero-copy"><div class="eyebrow">GOOGLE FORMS · NỀN TẢNG CHÍNH</div><h1>Một đường link.<br><span>Chủ động mọi tỷ lệ.</span></h1><p>Đọc toàn bộ biểu mẫu, tùy chỉnh từng đáp án và theo dõi tiến trình ở một nơi. Bắt đầu ngay với 10 lượt miễn phí.</p><div class="hero-actions"><a class="hero-start" href="#setupTitle">Dùng thử miễn phí <svg class="icon"><use href="#i-arrow"/></svg></a><span>Không cần tài khoản</span></div></div><aside class="hero-offer" aria-label="Gói unlimited"><div class="offer-label"><svg class="icon"><use href="#i-spark"/></svg>THÊM TỰ DO CHO MỖI LƯỢT CHẠY</div><h2>Unlimited.</h2><p>Một key. Không giới hạn lượt điền.</p><div class="offer-price">30.000<span>đ / key</span></div><button type="button" id="heroUpgrade">Mua key &amp; mở khóa <svg class="icon"><use href="#i-arrow"/></svg></button><small>Liên hệ trực tiếp qua Facebook hoặc Zalo</small></aside></section>
 <section class="usage-strip" aria-label="Hạn mức sử dụng"><div class="usage-heading"><span class="usage-icon"><svg class="icon"><use href="#i-shield"/></svg></span><div><strong id="planLabel">10 lượt miễn phí dành cho bạn</strong><p id="usageDetail">Đang kiểm tra hạn mức sử dụng...</p></div></div><div class="usage-meter"><span id="usageCount" aria-live="polite">— / 10 lượt</span><progress id="usageProgress" max="10" value="0" aria-label="Lượt miễn phí đã sử dụng"></progress></div><button type="button" id="upgradeButton">Mở khóa unlimited <svg class="icon"><use href="#i-arrow"/></svg></button></section>
 <ol class="how-it-works" aria-label="Ba bước sử dụng"><li><span>01</span><div><strong>Dán link biểu mẫu</strong><small>Tự đọc câu hỏi qua các trang</small></div></li><li><span>02</span><div><strong>Chọn tỷ lệ mong muốn</strong><small>Điều chỉnh hoặc tạo ngẫu nhiên</small></div></li><li><span>03</span><div><strong>Chạy &amp; theo dõi</strong><small>Xem kết quả, tải nhật ký</small></div></li></ol>
+<section class="provider-section" aria-label="Chọn loại biểu mẫu"><div class="provider-tabs" role="tablist" aria-label="Nền tảng biểu mẫu"><button type="button" id="tab-google" data-provider="google" role="tab" aria-controls="providerPanel" aria-selected="true" tabindex="0"><strong>Google Forms</strong><small>Phần chính · Đầy đủ tính năng</small></button><button type="button" id="tab-microsoft" data-provider="microsoft" role="tab" aria-controls="providerPanel" aria-selected="false" tabindex="-1"><strong>Microsoft Forms</strong><small>Form Microsoft công khai</small></button><button type="button" id="tab-html" data-provider="html" role="tab" aria-controls="providerPanel" aria-selected="false" tabindex="-1"><strong>Form web khác</strong><small>HTML chuẩn · Thử nghiệm</small></button></div><div id="providerPanel" class="provider-panel" role="tabpanel" aria-labelledby="tab-google"><strong id="providerHeading">Google Forms là phần chính của KDautoform</strong><p id="providerHelp">Giữ đầy đủ đọc nhiều trang, phân nhánh, tỷ lệ từng câu, câu trả lời tiếng Việt và nhật ký kết quả.</p></div></section>
 <section class="panel setup" aria-labelledby="setupTitle">
 <div class="panel-head"><span class="step">01</span><h2 id="setupTitle">Thiết lập lượt điền</h2><span class="tiny">Dán link để tự đọc toàn bộ form</span></div>
-<div class="input-grid"><div><label class="label" for="formUrl">Link Google Form</label><div class="url-wrap"><svg class="icon"><use href="#i-link"/></svg><input id="formUrl" type="url" placeholder="https://docs.google.com/forms/d/e/.../viewform" autocomplete="off" spellcheck="false"><button id="scanAgain" class="scan-again" type="button">Đọc lại</button></div></div>
+<div class="provider-chips" aria-label="Tính năng dùng chung"><span>Chỉnh tỷ lệ từng câu</span><span>Dữ liệu mô phỏng</span><span>Xuất SPSS .sav</span></div>
+<div class="input-grid"><div><label class="label" for="formUrl">Link Google Forms hoặc Microsoft Forms</label><div class="url-wrap"><svg class="icon"><use href="#i-link"/></svg><input id="formUrl" type="url" placeholder="Dán link docs.google.com/forms, forms.gle hoặc forms.office.com" autocomplete="off" spellcheck="false"><button id="scanAgain" class="scan-again" type="button">Đọc lại</button></div></div>
 <div><label class="label" for="quantity">Số lượng mong muốn</label><div class="quantity"><button type="button" id="minusCount" aria-label="Giảm số lượng">−</button><input id="quantity" type="number" min="1" max="10" step="1" value="10" aria-label="Số lượng mong muốn"><button type="button" id="plusCount" aria-label="Tăng số lượng">+</button></div></div></div>
-<div class="setup-bottom"><div id="scanStatus" class="scan-status" role="status" aria-live="polite"><svg class="icon"><use href="#i-shield"/></svg><span>Hỗ trợ Google Forms công khai và link forms.gle</span></div><span id="quantityHint" class="setup-tip">Tối đa 10 lượt miễn phí</span></div><p id="quantityError" class="quantity-error" role="status" hidden></p>
+<div class="setup-bottom"><div id="scanStatus" class="scan-status" role="status" aria-live="polite"><svg class="icon"><use href="#i-shield"/></svg><span>Google Forms và Microsoft Forms công khai</span></div><span id="quantityHint" class="setup-tip">Tối đa 10 lượt miễn phí</span></div><p id="quantityError" class="quantity-error" role="status" hidden></p>
 </section>
 <div class="workspace">
 <section class="questions" aria-labelledby="ratioTitle">
@@ -1528,7 +1560,7 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <button id="testButton" class="test-run" disabled><svg class="icon"><use href="#i-shield"/></svg>Điền thử 1 lượt, chưa gửi</button>
 <div class="test-note">Dữ liệu mô phỏng · Không có bước tạo tài khoản</div>
 </div>
-<div id="jobPanel" class="job-panel" hidden><div class="job-head"><span>Tiến trình thực hiện</span><span id="jobStatus" class="status-chip">ĐANG CHẠY</span></div><div class="job-numbers"><strong id="jobDone">0</strong><span id="jobTotal">/ 100 lượt</span></div><div id="jobBar" class="job-bar"><i></i></div><div id="jobDetail" class="job-detail" role="status" aria-live="polite"></div><div id="jobEvents" class="events"></div><a id="downloadLog" class="download" hidden><svg class="icon"><use href="#i-download"/></svg>Tải nhật ký kết quả</a></div>
+<div id="jobPanel" class="job-panel" hidden><div class="job-head"><span>Tiến trình thực hiện</span><span id="jobStatus" class="status-chip">ĐANG CHẠY</span></div><div class="job-numbers"><strong id="jobDone">0</strong><span id="jobTotal">/ 100 lượt</span></div><div id="jobBar" class="job-bar"><i></i></div><div id="jobDetail" class="job-detail" role="status" aria-live="polite"></div><div id="jobEvents" class="events"></div><a id="downloadLog" class="download" hidden><svg class="icon"><use href="#i-download"/></svg>Tải nhật ký kết quả</a><a id="downloadSpss" class="download spss-download" hidden><svg class="icon"><use href="#i-download"/></svg>Tải dữ liệu SPSS (.sav)</a><p id="spssNote" class="spss-note" hidden>Chỉ xuất phản hồi đã được xác nhận. Dữ liệu mô phỏng được ghi nhãn trong file.</p></div>
 </aside>
 </div>
 <footer id="contact" class="contact-footer"><div class="footer-copy"><strong>Mua key unlimited · 30.000đ/key</strong><p>Nhắn Facebook hoặc Zalo để nhận key và được hỗ trợ sử dụng.</p></div><div class="footer-links"><a href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span>0343415673</a><a href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span>Liên hệ Facebook</a></div></footer>
@@ -1544,13 +1576,24 @@ const icon=name=>'<svg class="icon"><use href="#i-'+name+'"/></svg>';
 const escapeHTML=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const colors=["#bc2635","#d34e59","#e78186","#eeb0af","#f1cac5","#e7d9d3","#c98c95","#dcb1b5"];
 const kinds={single:"Chọn một",dropdown:"Danh sách",multiple:"Chọn nhiều",scale:"Chấm điểm",grid:"Bảng đánh giá",grid_multiple:"Bảng chọn nhiều",text:"Trả lời ngắn",paragraph:"Tự luận",date:"Ngày tháng",time:"Thời gian"};
-const state={schema:null,config:{},scanId:null,scanToken:0,scanning:false,job:null,armed:false,autoTimer:null,remaining:0,pollTimer:null,forceCheck:false,access:null,undo:[]};
+const state={schema:null,config:{},scanId:null,scanToken:0,scanning:false,job:null,armed:false,autoTimer:null,remaining:0,pollTimer:null,forceCheck:false,access:null,spssAvailable:false,providerMode:"google",undo:[]};
 const emptyMarkup=$("questionList").innerHTML;
 let urlTimer=null,toastTimer=null;
 function toast(message){$("toast").textContent=message;$("toast").hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$("toast").hidden=true,4200)}
 async function api(path,data){const response=await fetch(path,{method:data?"POST":"GET",headers:data?{"Content-Type":"application/json","X-Local-Token":TOKEN}:{},body:data?JSON.stringify(data):undefined});let result;try{result=await response.json()}catch{throw Error("Máy chủ chưa trả về dữ liệu. Vui lòng thử lại.")}if(result.plan)applyAccess(result);if(!response.ok){if(response.status===402){cancelCountdown();if(result.locked)openKeyModal(result.error)}if(response.status===401&&!path.startsWith("/api/auth/"))status(result.error,"error");throw Error(result.error||"Không thực hiện được thao tác.")}return result}
 function activeJob(){return state.job&&["queued","running","stopping"].includes(state.job.status)}
-function validLink(value){return /^https:\/\/(?:docs\.google\.com\/forms\/|forms\.gle\/|forms\.google\.com\/)/i.test(value)}
+function providerFromLink(value){try{const host=new URL(value).hostname.toLowerCase();if(["docs.google.com","forms.gle","forms.google.com"].includes(host))return "google";if(["forms.office.com","forms.office365.com","forms.cloud.microsoft","forms.microsoft.com"].includes(host))return "microsoft"}catch{}return null}
+function validLink(value){if(state.providerMode==="html")return /^https:\/\//i.test(value);return /^https:\/\/(?:docs\.google\.com\/forms\/|forms\.gle\/|forms\.google\.com\/|forms\.office\.com\/|forms\.office365\.com\/|forms\.cloud\.microsoft\/|forms\.microsoft\.com\/)/i.test(value)}
+function selectProvider(provider,reset=false){
+if(!["google","microsoft","html"].includes(provider)||activeJob())return;
+state.providerMode=provider;localStorage.setItem("formpilot.provider",provider);
+const copy={google:["Google Forms là phần chính của KDautoform","Giữ đầy đủ đọc nhiều trang, phân nhánh, tỷ lệ từng câu, câu trả lời tiếng Việt và nhật ký kết quả.","Link Google Forms","https://docs.google.com/forms/d/e/.../viewform"],microsoft:["Microsoft Forms công khai","Tự đọc câu hỏi và các phần, chỉnh tỷ lệ và điền theo nhánh. Biểu mẫu cần cho phép Anyone can respond.","Link Microsoft Forms","https://forms.office.com/r/..."],html:["Form web khác · HTML chuẩn thử nghiệm","Hỗ trợ form HTML POST một trang với ô nhập và lựa chọn chuẩn. Form tùy biến, đăng nhập, CAPTCHA hoặc nhiều bước chưa được hỗ trợ. Dùng Điền thử để kiểm tra trước.","Link form HTML công khai","https://website-cua-ban.example/khao-sat"]}[provider];
+$("providerHeading").textContent=copy[0];$("providerHelp").textContent=copy[1];$("providerPanel").setAttribute("aria-labelledby","tab-"+provider);
+document.querySelectorAll("[data-provider]").forEach(node=>{const chosen=node.dataset.provider===provider;node.setAttribute("aria-selected",String(chosen));node.tabIndex=chosen?0:-1});
+$("formUrl").closest(".input-grid").querySelector("label").textContent=copy[2];$("formUrl").placeholder=copy[3];
+if(provider==="html")$("autoRun").checked=false;
+if(reset){clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.schema=null;state.config={};state.scanId=null;state.scanning=false;state.armed=false;state.undo=[];$("formUrl").value="";localStorage.removeItem("formpilot.scan");localStorage.removeItem("formpilot.draft");localStorage.setItem("formpilot.url","");$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link "+(provider==="html"?"form HTML chuẩn":provider==="microsoft"?"Microsoft Forms":"Google Forms")+" để bắt đầu.");renderSummary()}
+}
 function status(text,kind=""){const node=$("scanStatus");node.className="scan-status "+kind;node.innerHTML=(kind==="loading"?'<span class="spinner"></span>':icon(kind==="success"?"check":kind==="error"?"alert":"shield"))+"<span>"+escapeHTML(text)+"</span>"}
 function quantity(){const raw=$("quantity").value.trim();if(raw==="")return null;const value=Number(raw);return Number.isInteger(value)&&value>=0?value:null}
 function fieldValid(field){const entry=state.config[field.id];if(!entry)return false;if(field.options.length){const values=field.options.map(option=>Number(entry.rates[option]));if(values.some(value=>!Number.isFinite(value)||value<0||value>100))return false;const sum=values.reduce((a,b)=>a+b,0);return ["multiple","grid_multiple"].includes(field.kind)?sum>=field.minimum*100-.001&&sum<=field.maximum*100+.001:Math.abs(sum-100)<.001}return entry.mode!=="fixed"||Boolean(entry.value.trim())}
@@ -1564,9 +1607,9 @@ function fieldNumber(field){const ids=[...new Set(state.schema.fields.map(f=>f.i
 function buildCard(field){const config=state.config[field.id],multi=["multiple","grid_multiple"].includes(field.kind);let body="";if(field.options.length){body='<div class="answers">'+field.options.map((option,i)=>'<div class="answer-row"><div class="answer-label"><i class="option-dot" style="background:'+colors[i%colors.length]+'"></i><span>'+escapeHTML(option)+'</span></div><input type="range" min="0" max="100" step="1" class="rate-range" data-field="'+field.id+'" data-option="'+i+'" value="'+config.rates[option]+'" aria-label="Tỷ lệ '+escapeHTML(option)+'"><label class="rate-box"><input type="number" min="0" max="100" step="1" class="rate-number" data-field="'+field.id+'" data-option="'+i+'" value="'+config.rates[option]+'" aria-label="Tỷ lệ mong muốn '+escapeHTML(option)+'"><span>%</span></label></div>').join("")+'</div><div class="rate-stack">'+field.options.map((_,i)=>'<i data-segment="'+i+'" style="background:'+colors[i%colors.length]+'"></i>').join("")+'</div><div class="q-bottom"><span>'+(multi?"Chọn "+field.minimum+"–"+field.maximum+" đáp án mỗi lượt":"Tỷ lệ mong muốn cho mỗi đáp án")+'</span><span class="sum"></span><button class="small-button normalize-one" data-field="'+field.id+'" type="button">Chuẩn hóa</button></div>'}else{const temporal=["date","time"].includes(field.kind);body='<div class="text-mode">'+icon("spark")+'<span>'+(temporal?"Tự tạo ngày / giờ phù hợp":"Trả lời theo hồ sơ và nội dung câu hỏi")+'</span>'+(!temporal?'<select class="text-mode-select" data-field="'+field.id+'" aria-label="Chế độ câu trả lời"><option value="auto" '+(config.mode==="auto"?"selected":"")+'>Tự động</option><option value="fixed" '+(config.mode==="fixed"?"selected":"")+'>Nội dung tự nhập</option></select>':"")+'</div>'+(!temporal?'<textarea class="fixed-text" data-field="'+field.id+'" aria-label="Nội dung tự nhập" placeholder="Nhập câu trả lời bạn muốn sử dụng..." '+(config.mode==="fixed"?"":"hidden")+'>'+escapeHTML(config.value||"")+'</textarea>':"")}
 return '<article class="panel question-card" id="'+cardId(field)+'" data-field="'+field.id+'" data-page="'+field.page+'"><div class="q-top"><span class="q-label">Câu '+fieldNumber(field)+'</span><span class="q-kind">'+kinds[field.kind]+'</span>'+(field.required?'<span class="required">• Bắt buộc</span>':"")+(field.options.length?'<button class="small-button random-one" data-field="'+field.id+'" type="button">'+icon("dice")+'Ngẫu nhiên</button>':"")+'</div><h3>'+escapeHTML(field.question)+'</h3>'+(field.row?'<p class="row-name">'+escapeHTML(field.row)+'</p>':"")+body+'</article>'}
 function updateCard(field){const card=$(cardId(field));if(!card)return;const valid=fieldValid(field);card.classList.toggle("invalid",!valid);if(!field.options.length)return;const rates=field.options.map(option=>Number(state.config[field.id].rates[option]));const total=rates.reduce((a,b)=>a+b,0);field.options.forEach((option,i)=>{const segment=card.querySelector('[data-segment="'+i+'"]');segment.style.width=(total?Math.max(0,rates[i])/total*100:0)+"%"});const sum=card.querySelector(".sum");sum.innerHTML=(valid?icon("check"):icon("alert"))+(Number.isFinite(total)?Number(total.toFixed(2)):"—")+"%";const multi=["multiple","grid_multiple"].includes(field.kind);card.querySelector(".normalize-one").hidden=multi;sum.title=multi?"Tổng tỷ lệ có thể vượt 100% do được chọn nhiều đáp án":"Tổng tỷ lệ phải bằng 100%"}
-function renderQuestions(){if(!state.schema){$("questionList").innerHTML=emptyMarkup;return}$("questionList").innerHTML=state.schema.fields.map(buildCard).join("");state.schema.fields.forEach(updateCard);$("fieldCount").textContent=state.schema.question_count+" câu hỏi";$("formMeta").hidden=false;$("formMeta").innerHTML="<strong>"+escapeHTML(state.schema.title)+"</strong><small>"+state.schema.pages.length+" trang · "+state.schema.fields.length+" mục trả lời · "+(state.schema.branching?"Có phân nhánh":"Tự điền đủ toàn bộ trang")+"</small>";$("toolbar").hidden=false;$("pageFilter").innerHTML='<option value="">Mọi trang</option>'+state.schema.pages.map(page=>'<option value="'+page.index+'">Trang '+(page.index+1)+'</option>').join("");filterQuestions();renderSummary()}
+function renderQuestions(){if(!state.schema){$("questionList").innerHTML=emptyMarkup;return}$("questionList").innerHTML=state.schema.fields.map(buildCard).join("");state.schema.fields.forEach(updateCard);$("fieldCount").textContent=state.schema.question_count+" câu hỏi";$("formMeta").hidden=false;$("formMeta").innerHTML="<strong>"+escapeHTML(state.schema.title)+"</strong><small>"+(state.schema.provider==="microsoft"?"Microsoft Forms":state.schema.provider==="html"?"Form HTML":"Google Forms")+" · "+state.schema.pages.length+" trang · "+state.schema.fields.length+" mục trả lời · "+(state.schema.branching?"Có phân nhánh":"Tự điền đủ toàn bộ trang")+"</small>";$("toolbar").hidden=false;$("pageFilter").innerHTML='<option value="">Mọi trang</option>'+state.schema.pages.map(page=>'<option value="'+page.index+'">Trang '+(page.index+1)+'</option>').join("");filterQuestions();renderSummary()}
 function filterQuestions(){if(!state.schema)return;const term=fold($("searchQuestions").value),page=$("pageFilter").value;let count=0;for(const field of state.schema.fields){const visible=(!term||fold(field.question+" "+(field.row||"")).includes(term))&&(page===""||String(field.page)===page);const card=$(cardId(field));if(card){card.hidden=!visible;if(visible)count++}}let empty=$("noResults");if(!count&&!empty){empty=document.createElement("div");empty.id="noResults";empty.className="no-results";empty.textContent="Không có câu hỏi phù hợp."; $("questionList").append(empty)}else if(count&&empty)empty.remove()}
-function renderSummary(){const count=quantity(),isActive=activeJob(),locked=Boolean(state.access?.locked),unlimited=state.access?.plan==="unlimited";$("summaryCount").innerHTML=(count===0?"∞":count===null?"—":count.toLocaleString("vi-VN"))+"<small>lượt điền</small>";$("summaryQuestions").textContent=state.schema?state.schema.question_count+" câu · "+state.schema.pages.length+" trang":"Chưa kết nối";const valid=state.schema?state.schema.fields.filter(fieldValid).length:0,total=state.schema?.fields.length||0;$("summaryValid").textContent=total?valid+"/"+total+" mục":"—";$("summaryValid").className=total?(valid===total?"good":"bad"):"";$("summaryMode").textContent=state.schema?(count>0&&!state.schema.branching&&!state.schema.fields.some(f=>f.exclusive_columns)?"Theo số lượt":"Theo xác suất"):"Theo mong muốn";const button=$("startButton");button.classList.toggle("stop",Boolean(isActive));button.disabled=isActive?state.job.status==="stopping":locked?false:!ready();button.innerHTML=icon(isActive?"stop":locked?"shield":"play")+"<span>"+(isActive?(state.job.status==="stopping"?"Đang dừng...":"Dừng lượt chạy"):locked?"Nhập key để tiếp tục":state.remaining>0?"Bắt đầu ngay":state.schema?"Bắt đầu điền form":"Dán link để bắt đầu")+"</span>";$("testButton").disabled=!ready()||isActive;$("randomAll").disabled=!state.schema||isActive;$("balanceAll").disabled=!state.schema||isActive;$("undoRates").disabled=!state.undo.length||isActive;$("formUrl").disabled=Boolean(isActive)||locked;$("quantity").disabled=Boolean(isActive)||locked;$("minusCount").disabled=Boolean(isActive)||locked;$("plusCount").disabled=Boolean(isActive)||locked||(!unlimited&&count>=state.access?.remaining);$("scanAgain").disabled=Boolean(isActive)||state.scanning||locked;document.querySelectorAll(".question-card input,.question-card select,.question-card textarea,.question-card button").forEach(el=>el.disabled=Boolean(isActive)||locked);const badCount=Boolean(state.access)&&!isActive&&!locked&&!allowedCount();$("quantityError").hidden=!badCount;$("quantityError").textContent=badCount?(unlimited?"Nhập số nguyên từ 0 trở lên.":"Bạn còn "+state.access.remaining+" lượt miễn phí. Chọn từ 1 đến "+state.access.remaining+" hoặc mở khóa unlimited."):""}
+function renderSummary(){const count=quantity(),isActive=activeJob(),locked=Boolean(state.access?.locked),unlimited=state.access?.plan==="unlimited";$("summaryCount").innerHTML=(count===0?"∞":count===null?"—":count.toLocaleString("vi-VN"))+"<small>lượt điền</small>";$("summaryQuestions").textContent=state.schema?state.schema.question_count+" câu · "+state.schema.pages.length+" trang":"Chưa kết nối";const valid=state.schema?state.schema.fields.filter(fieldValid).length:0,total=state.schema?.fields.length||0;$("summaryValid").textContent=total?valid+"/"+total+" mục":"—";$("summaryValid").className=total?(valid===total?"good":"bad"):"";$("summaryMode").textContent=state.schema?(count>0&&!state.schema.branching&&!state.schema.fields.some(f=>f.exclusive_columns)?"Theo số lượt":"Theo xác suất"):"Theo mong muốn";const button=$("startButton");button.classList.toggle("stop",Boolean(isActive));button.disabled=isActive?state.job.status==="stopping":locked?false:!ready();button.innerHTML=icon(isActive?"stop":locked?"shield":"play")+"<span>"+(isActive?(state.job.status==="stopping"?"Đang dừng...":"Dừng lượt chạy"):locked?"Nhập key để tiếp tục":state.remaining>0?"Bắt đầu ngay":state.schema?"Bắt đầu điền form":"Dán link để bắt đầu")+"</span>";$("testButton").disabled=!ready()||isActive;$("randomAll").disabled=!state.schema||isActive;$("balanceAll").disabled=!state.schema||isActive;$("undoRates").disabled=!state.undo.length||isActive;$("formUrl").disabled=Boolean(isActive)||locked;$("quantity").disabled=Boolean(isActive)||locked;$("minusCount").disabled=Boolean(isActive)||locked;$("plusCount").disabled=Boolean(isActive)||locked||(!unlimited&&count>=state.access?.remaining);$("scanAgain").disabled=Boolean(isActive)||state.scanning||locked;document.querySelectorAll(".provider-tabs button").forEach(el=>el.disabled=Boolean(isActive));document.querySelectorAll(".question-card input,.question-card select,.question-card textarea,.question-card button").forEach(el=>el.disabled=Boolean(isActive)||locked);const badCount=Boolean(state.access)&&!isActive&&!locked&&!allowedCount();$("quantityError").hidden=!badCount;$("quantityError").textContent=badCount?(unlimited?"Nhập số nguyên từ 0 trở lên.":"Bạn còn "+state.access.remaining+" lượt miễn phí. Chọn từ 1 đến "+state.access.remaining+" hoặc mở khóa unlimited."):""}
 function cancelCountdown(){clearInterval(state.autoTimer);state.autoTimer=null;state.remaining=0;$("countdown").hidden=true;renderSummary()}
 function scheduleAuto(){persistDraft();cancelCountdown();if(!state.access||state.access.locked||!state.armed||!$("autoRun").checked||!ready()||activeJob())return;state.remaining=12;$("countdown").hidden=false;function paint(){$("countdown").innerHTML="Tự bắt đầu sau <strong>"+state.remaining+" giây</strong>. Chỉnh tỷ lệ để đặt lại thời gian. <button type='button' id='pauseAuto'>Tạm dừng</button>";renderSummary()}paint();state.autoTimer=setInterval(()=>{state.remaining--;if(state.remaining<=0){cancelCountdown();startJob(false).catch(error=>toast(error.message))}else paint()},1000)}
 function rememberRates(){state.undo.push(JSON.stringify(state.config));if(state.undo.length>25)state.undo.shift();$("undoRates").disabled=false}
@@ -1575,13 +1618,15 @@ function undoRates(){if(!state.undo.length||activeJob())return;state.config=JSON
 function updateRate(fieldId,optionIndex,value){rememberRates();const field=state.schema.fields.find(f=>f.id===fieldId);if(!field)return;const rate=Number(value);state.config[fieldId].rates[field.options[optionIndex]]=rate;const card=$(cardId(field));card.querySelectorAll('[data-option="'+optionIndex+'"]').forEach(input=>{if(input!==document.activeElement)input.value=value});updateCard(field);renderSummary();persistDraft();scheduleAuto()}
 function refreshCard(field){const old=$(cardId(field));if(old){old.outerHTML=buildCard(field);updateCard(field)}}
 function normalizeField(field,balanced=false){if(!field.options.length)return;if(["multiple","grid_multiple"].includes(field.kind)){if(balanced){const target=Math.min(field.maximum*100,Math.max(field.minimum*100,180));let values=apportion(field.options.map(()=>1),target);state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}return}const values=apportion(field.options.map(option=>balanced?1:Math.max(0,Number(state.config[field.id].rates[option])||0)));state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}
-async function scanForm(){const url=$("formUrl").value.trim();cancelCountdown();if(activeJob())return;if(state.access?.locked){openKeyModal("Bạn đã dùng hết 10 lượt miễn phí.");return}if(!validLink(url)){status(url?"Vui lòng nhập link Google Form hợp lệ.":"Hỗ trợ Google Forms công khai và link forms.gle",url?"error":"");return}const token=++state.scanToken;state.scanning=true;state.armed=true;state.schema=null;state.config={};$("formMeta").hidden=true;$("toolbar").hidden=true;$("fieldCount").textContent="Đang đọc...";$("questionList").innerHTML='<div class="loading-skeleton" aria-label="Đang đọc câu hỏi"></div>';status("Đang đọc câu hỏi và tất cả các trang...","loading");renderSummary();try{const result=await api("/api/scan",{url});if(token!==state.scanToken)return;state.scanId=result.scan_id;const poll=async()=>{if(token!==state.scanToken)return;try{const value=await api("/api/scans/"+state.scanId);if(token!==state.scanToken)return;if(value.status==="scanning"){setTimeout(poll,650);return}if(value.status==="error")throw Error(value.error);state.schema=value.schema;state.config=value.config;state.undo=[];$("undoRates").disabled=true;state.scanning=false;localStorage.setItem("formpilot.scan",state.scanId);localStorage.setItem("formpilot.url",url);renderQuestions();status("Đã đọc "+value.schema.question_count+" câu hỏi qua "+value.schema.pages.length+" trang.","success");scheduleAuto()}catch(error){if(token===state.scanToken)scanError(error)}};poll()}catch(error){if(token===state.scanToken)scanError(error)}}
+async function scanForm(){const url=$("formUrl").value.trim();const detected=providerFromLink(url);if(detected&&detected!==state.providerMode)selectProvider(detected);cancelCountdown();if(activeJob())return;if(state.access?.locked){openKeyModal("Bạn đã dùng hết 10 lượt miễn phí.");return}if(!validLink(url)){status(url?"Vui lòng nhập link hợp lệ cho loại biểu mẫu đã chọn.":"Google Forms và Microsoft Forms công khai",url?"error":"");return}const token=++state.scanToken;state.scanning=true;state.armed=true;state.schema=null;state.config={};$("formMeta").hidden=true;$("toolbar").hidden=true;$("fieldCount").textContent="Đang đọc...";$("questionList").innerHTML='<div class="loading-skeleton" aria-label="Đang đọc câu hỏi"></div>';status("Đang đọc câu hỏi và tất cả các trang...","loading");renderSummary();try{const result=await api("/api/scan",{url,provider:state.providerMode});if(token!==state.scanToken)return;state.scanId=result.scan_id;const poll=async()=>{if(token!==state.scanToken)return;try{const value=await api("/api/scans/"+state.scanId);if(token!==state.scanToken)return;if(value.status==="scanning"){setTimeout(poll,650);return}if(value.status==="error")throw Error(value.error);state.schema=value.schema;state.config=value.config;state.undo=[];$("undoRates").disabled=true;state.scanning=false;localStorage.setItem("formpilot.scan",state.scanId);localStorage.setItem("formpilot.url",url);renderQuestions();status("Đã đọc "+value.schema.question_count+" câu hỏi qua "+value.schema.pages.length+" trang.","success");scheduleAuto()}catch(error){if(token===state.scanToken)scanError(error)}};poll()}catch(error){if(token===state.scanToken)scanError(error)}}
 function scanError(error){state.scanning=false;state.schema=null;state.config={};state.armed=false;status(error.message,"error");$("fieldCount").textContent="0 câu hỏi";$("questionList").innerHTML=emptyMarkup;renderSummary();toast(error.message)}
 async function startJob(checkOnly){cancelCountdown();if(state.access?.locked){openKeyModal();return}if(!ready()||activeJob())return;state.armed=false;const count=quantity();try{const result=await api("/api/jobs",{scan_id:state.scanId,count,config:state.config,delay:2,headless:!$("showBrowser").checked,mode:checkOnly?"check":"send"});localStorage.setItem("formpilot.job",result.job_id);state.job={id:result.job_id,mode:result.mode,status:"queued",processed:0,total:result.mode==="check"?1:count,events:[]};renderJob();pollJob()}catch(error){toast(error.message);renderSummary()}}
 async function pollJob(){if(!state.job)return;try{state.job=await api("/api/jobs/"+state.job.id);await api("/api/auth/status");renderJob();if(activeJob())state.pollTimer=setTimeout(pollJob,1000)}catch(error){toast(error.message);clearTimeout(state.pollTimer)}}
-function renderJob(){const job=state.job;if(!job)return;$("jobPanel").hidden=false;const labels={queued:"ĐANG CHUẨN BỊ",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+job.status;$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Google đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";renderSummary()}
-$("formUrl").addEventListener("input",()=>{clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.armed=false;if(validLink($("formUrl").value.trim()))urlTimer=setTimeout(scanForm,850);else{state.schema=null;state.config={};state.scanning=false;$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link Google Form để bắt đầu.");renderSummary()}});
+function renderJob(){const job=state.job;if(!job)return;$("jobPanel").hidden=false;const labels={queued:"ĐANG CHUẨN BỊ",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+job.status;$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Biểu mẫu đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";const sav=state.spssAvailable&&job.confirmed>0;$("downloadSpss").hidden=!sav;$("spssNote").hidden=!sav;$("downloadSpss").href="/api/jobs/"+job.id+"/export.sav";renderSummary()}
+$("formUrl").addEventListener("input",()=>{clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.armed=false;if(validLink($("formUrl").value.trim()))urlTimer=setTimeout(scanForm,850);else{state.schema=null;state.config={};state.scanning=false;$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link Google Forms hoặc Microsoft Forms để bắt đầu.");renderSummary()}});
 $("scanAgain").addEventListener("click",scanForm);
+document.querySelectorAll(".provider-tabs button").forEach(button=>button.addEventListener("click",()=>selectProvider(button.dataset.provider,true)));
+document.querySelector(".provider-tabs").addEventListener("keydown",event=>{if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key)||activeJob())return;const buttons=[...document.querySelectorAll(".provider-tabs button")];let i=buttons.indexOf(document.activeElement);if(i<0)return;event.preventDefault();i=event.key==="Home"?0:event.key==="End"?buttons.length-1:(i+(event.key==="ArrowRight"?1:-1)+buttons.length)%buttons.length;buttons[i].click();buttons[i].focus()});
 $("quantity").addEventListener("input",()=>{localStorage.setItem("formpilot.count",$("quantity").value);renderSummary();scheduleAuto()});
 $("minusCount").addEventListener("click",()=>{$("quantity").value=Math.max(1,(quantity()||1)-1);$("quantity").dispatchEvent(new Event("input"))});
 $("plusCount").addEventListener("click",()=>{$("quantity").value=(quantity()||0)+1;$("quantity").dispatchEvent(new Event("input"))});
@@ -1596,8 +1641,9 @@ $("countdown").addEventListener("click",event=>{if(event.target.closest("#pauseA
 $("undoRates").addEventListener("click",undoRates);document.addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"&&!event.target.matches("input,textarea,select")){event.preventDefault();undoRates()}});
 $("searchQuestions").addEventListener("input",filterQuestions);$("pageFilter").addEventListener("change",filterQuestions);
 $("testButton").addEventListener("click",()=>startJob(true));
+$("downloadSpss").addEventListener("click",async event=>{event.preventDefault();const link=$("downloadSpss");if(link.getAttribute("aria-busy")==="true")return;link.setAttribute("aria-busy","true");try{const response=await fetch(link.href);if(!response.ok){let info={};try{info=await response.json()}catch{}throw Error(info.error||"Chưa xuất được dữ liệu SPSS.")}const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="KDautoform_"+state.job.id+".sav";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast("Đã tải file .sav. Mở trong SPSS bằng File → Open → Data.")}catch(error){toast(error.message)}finally{link.removeAttribute("aria-busy")}});
 $("startButton").addEventListener("click",async()=>{if(activeJob()){try{state.job=await api("/api/jobs/"+state.job.id+"/stop",{});renderJob()}catch(error){toast(error.message)}}else if(state.access?.locked){openKeyModal()}else startJob(false)});
-async function init(){const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";try{const info=await api("/api/state");state.forceCheck=info.force_check;if(info.plan!=="unlimited"&&(quantity()===null||quantity()===0||quantity()>info.remaining))$("quantity").value=Math.max(1,info.remaining);$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ. Vui lòng tải lại trang.","error");$("usageDetail").textContent="Chưa kết nối được máy chủ. Vui lòng thử tải lại trang."}renderSummary()}
+async function init(){const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";selectProvider(providerFromLink($("formUrl").value)||localStorage.getItem("formpilot.provider")||"google");try{const info=await api("/api/state");state.forceCheck=info.force_check;state.spssAvailable=Boolean(info.spss_export);if(info.plan!=="unlimited"&&(quantity()===null||quantity()===0||quantity()>info.remaining))$("quantity").value=Math.max(1,info.remaining);$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ. Vui lòng tải lại trang.","error");$("usageDetail").textContent="Chưa kết nối được máy chủ. Vui lòng thử tải lại trang."}renderSummary()}
 let keyReturnFocus=null;
 function applyAccess(info){
 state.access=info;
@@ -1850,13 +1896,16 @@ class WebApplication:
         self.key_store = key_store or configured_key_store()
         self.headless_only = headless_only
         self.lock = threading.RLock()
+        self.export_lock = threading.Lock()
         self.scans, self.jobs = {}, {}
         self.token = secrets.token_urlsafe(32)
         self.force_check = force_check
 
-    def scan(self, url):
+    def scan(self, url, provider="auto"):
         import threading
-        url = form_link(str(url))
+        if provider not in ("auto", "google", "microsoft", "html"):
+            raise FormError("Loại biểu mẫu không hợp lệ.")
+        url = form_link(str(url), allow_generic=provider == "html")
         scan_id = secrets.token_hex(8)
         state = {"id": scan_id, "status": "scanning", "url": url}
         with self.lock:
@@ -1868,7 +1917,7 @@ class WebApplication:
             self.scans[scan_id] = state
         def worker():
             try:
-                with FormBrowser(headless=True) as browser:
+                with form_browser(url)(headless=True) as browser:
                     schema = browser.load(url)
                 config = default_web_config(schema, secrets.randbits(32))
                 with self.lock:
@@ -1892,6 +1941,32 @@ class WebApplication:
             if job is None:
                 raise FormError("Không tìm thấy lượt chạy.")
             return json.loads(json.dumps({key: value for key, value in job.items() if key not in ("stop_event", "schema", "config", "access_key_hash", "access_activation_id", "owner_id", "guest_id")}, ensure_ascii=False))
+
+    def export_job(self, job_id):
+        from spss_export import export_spss, SpssExportError
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None or not job.get("confirmed") or not job.get("log_path"):
+                raise FormError("Chưa có phản hồi được xác nhận để xuất SPSS. Điền thử không tạo dữ liệu đã gửi.")
+            schema, log_path = job["schema"], job["log_path"]
+        if not self.export_lock.acquire(blocking=False):
+            raise FormError("Máy chủ đang xuất một file SPSS. Vui lòng thử lại sau khi hoàn tất.")
+        target = None
+        try:
+            descriptor, filename = tempfile.mkstemp(prefix="KDautoform_", suffix=".sav")
+            os.close(descriptor)
+            target = Path(filename)
+            return export_spss(schema, log_path, target)
+        except SpssExportError as exc:
+            if target:
+                target.unlink(missing_ok=True)
+            raise FormError(str(exc)) from exc
+        except Exception:
+            if target:
+                target.unlink(missing_ok=True)
+            raise
+        finally:
+            self.export_lock.release()
 
     def event(self, job, message, level="info"):
         with self.lock:
@@ -1969,7 +2044,7 @@ class WebApplication:
     def _run_job(self, job):
         schema, stop = job["schema"], job["stop_event"]
         app = self
-        class ProgressBrowser(FormBrowser):
+        class ProgressBrowser(form_browser(schema["url"])):
             def fill_field(self, field, value):
                 if stop.is_set() or not active_job_key(job, app.key_store):
                     raise WebStopRequested()
@@ -1987,7 +2062,8 @@ class WebApplication:
         with self.lock:
             job.update(status="running", log_path=str(path))
         log.write({"event": "run", "synthetic": True, "url": schema["url"], "count": job["requested"],
-                   "seed": job["seed"], "config": job["config"], "mode": job["mode"]})
+                   "seed": job["seed"], "config": job["config"], "mode": job["mode"],
+                   "provider": schema.get("provider", "google")})
         self.event(job, "Đã kích hoạt công cụ. Mở trình duyệt để điền toàn bộ biểu mẫu.")
         try:
             sampler = WebRatioSampler(schema, job["config"], job["requested"], job["seed"])
@@ -2032,7 +2108,7 @@ class WebApplication:
                                     counts[option] = counts.get(option, 0) + 1
                         job["last_profile"] = sampler.last_profile
                     self.event(job, f'Lượt {index}: đã điền đủ {report["questions"]} câu qua {report["pages"]} trang. '
-                               + ("Google đã xác nhận lưu." if job["mode"] == "send" else "Dừng trước Gửi, chưa gửi phản hồi."), "success")
+                               + ("Biểu mẫu đã xác nhận lưu." if job["mode"] == "send" else "Dừng trước Gửi, chưa gửi phản hồi."), "success")
             with self.lock:
                 job.update(status="completed", current_question="")
             self.event(job, "Hoàn tất lượt chạy.", "success")
@@ -2176,7 +2252,8 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     return
                 if path == "/api/state":
                     self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only,
-                                     "version": "5.0", "name": "KDautoform", **self.access_state(session)})
+                                     "version": "6.0", "name": "KDautoform", "providers": ["google", "microsoft", "html"],
+                                     "spss_export": spss_available(), **self.access_state(session)})
                 elif path.startswith("/api/scans/"):
                     scan_id = path.rsplit("/", 1)[-1]
                     self.require_owner("scan", scan_id, session)
@@ -2196,6 +2273,23 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     with target.open("rb") as handle:
                         while chunk := handle.read(65536):
                             self.wfile.write(chunk)
+                elif path.startswith("/api/jobs/") and path.endswith("/export.sav"):
+                    job_id = path.split("/")[3]
+                    self.require_owner("job", job_id, session)
+                    target = app.export_job(job_id)
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header("Content-Disposition", 'attachment; filename="KDautoform_' + job_id + '.sav"')
+                        self.send_header("Content-Length", str(target.stat().st_size))
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("X-Content-Type-Options", "nosniff")
+                        self.end_headers()
+                        with target.open("rb") as handle:
+                            while chunk := handle.read(65536):
+                                self.wfile.write(chunk)
+                    finally:
+                        target.unlink(missing_ok=True)
                 elif path.startswith("/api/jobs/"):
                     job_id = path.rsplit("/", 1)[-1]
                     self.require_owner("job", job_id, session)
@@ -2255,7 +2349,7 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                 if path == "/api/scan":
                     if self.access_state(session)["locked"]:
                         raise QuotaExceeded("Bạn đã dùng hết 10 lượt miễn phí. Mua key unlimited 30.000đ/key để tiếp tục.")
-                    result = app.scan(str(payload.get("url", "")))
+                    result = app.scan(str(payload.get("url", "")), provider=payload.get("provider", "auto"))
                     with app.lock:
                         app.scans[result["scan_id"]]["owner_id"] = session["owner_id"]
                     self.reply(202, result)
@@ -2323,7 +2417,7 @@ UX_PRINCIPLES = [['Phân cấp thị giác', 'Tiêu đề, số lượng, tỷ l
 def cli(argv=None):
     load_local_key_environment()
     parser = argparse.ArgumentParser(
-        description="Tự điền Google Form công khai bằng dữ liệu giả để kiểm thử. Chỉ sửa FORM_URL.",
+        description="Tự điền Google Forms / Microsoft Forms công khai bằng dữ liệu giả để kiểm thử. Chỉ sửa FORM_URL.",
         epilog="--count 0 chạy đến Ctrl+C. --check điền đến trang cuối nhưng không gửi. "
                "Form yêu cầu đăng nhập, tải tệp, CAPTCHA hoặc quy tắc chưa hỗ trợ sẽ báo dừng. "
                "Form phân nhánh được điền đầy đủ theo nhánh đã chọn.")
@@ -2341,7 +2435,9 @@ def cli(argv=None):
     key_commands.add_argument("--key-delete", metavar="TEN", help="Xóa một key")
     key_commands.add_argument("--key-disable", metavar="TEN", help="Khóa một key")
     key_commands.add_argument("--key-enable", metavar="TEN", help="Mở lại một key")
-    parser.add_argument("--url", help="Link Google Form, thay cho FORM_URL trong mã")
+    parser.add_argument("--url", help="Link Google Forms hoặc Microsoft Forms, thay cho FORM_URL trong mã")
+    parser.add_argument("--provider", choices=("auto", "google", "microsoft", "html"), default="auto",
+                        help="Mặc định tự nhận Google/Microsoft; html cho form HTML POST chuẩn thử nghiệm")
     parser.add_argument("--count", type=int, help="Số lượt; 0 = chạy liên tục")
     parser.add_argument("--delay", type=float, default=2.0, help="Giây nghỉ giữa các lượt, mặc định 2")
     parser.add_argument("--seed", type=int, help="Tái tạo cùng bộ dữ liệu ngẫu nhiên")
@@ -2350,7 +2446,8 @@ def cli(argv=None):
     parser.add_argument("--inspect", action="store_true", help="Xem cấu trúc và tỷ lệ dự kiến")
     parser.add_argument("--resume", type=Path, help="Tiếp tục nhật ký cũ, bỏ qua lượt đã xác nhận")
     parser.add_argument("--log", type=Path, help="Đường dẫn nhật ký; mặc định lưu ngoài thư mục mã nguồn")
-    parser.add_argument("--setup", action="store_true", help="Cài Playwright và Chromium, rồi thoát")
+    parser.add_argument("--spss-out", type=Path, help="Xuất phản hồi đã xác nhận sang .sav sau khi đợt gửi hoàn tất")
+    parser.add_argument("--setup", action="store_true", help="Cài các thư viện trong requirements.txt và Chromium, rồi thoát")
     args = parser.parse_args(argv)
     if args.key_generate is not None or args.key_paths or any(getattr(args, name) for name in ("key_list", "key_add", "key_rotate", "key_delete", "key_disable", "key_enable")):
         try:
@@ -2372,6 +2469,8 @@ def cli(argv=None):
         parser.error("--count phải từ 0 trở lên.")
     if args.check and args.inspect:
         parser.error("Chọn --check hoặc --inspect.")
+    if args.spss_out and (args.check or args.inspect or args.web):
+        parser.error("--spss-out dùng cho đợt gửi CLI; giao diện web có nút Tải SPSS riêng.")
     if args.resume and (args.url or args.count is not None or args.seed is not None or args.log or args.check or args.inspect):
         parser.error("--resume chỉ dùng cùng --delay và --headless.")
     if args.ux_report:
@@ -2406,7 +2505,8 @@ def cli(argv=None):
                 count = int(input("Số lượt cần điền (0 = chạy liên tục, Ctrl+C để dừng): ").strip())
             if count < 0:
                 raise FormError("Số lượt phải từ 0 trở lên.")
-        with FormBrowser(headless=args.headless) as bot:
+        url = form_link(url, allow_generic=args.provider == "html" or (args.resume and header.get("provider") == "html"))
+        with form_browser(url)(headless=args.headless) as bot:
             schema = bot.load(url)
             sampler = Sampler(schema, seed, header.get("reference_date") if args.resume else None)
             print(f'\n{schema["title"]}\nĐã nhận diện {len(schema["pages"])} trang, '
@@ -2426,7 +2526,7 @@ def cli(argv=None):
                 log = RunLog(path)
                 log.write({"event": "run", "synthetic": True, "url": schema["url"],
                            "seed": seed, "count": count, "schema_hash": fingerprint(schema),
-                           "reference_date": sampler.reference_date.isoformat()})
+                           "reference_date": sampler.reference_date.isoformat(), "provider": schema.get("provider", "google")})
             if log:
                 print(f"Nhật ký: {log.path.resolve()}")
             for index in itertools.count(completed + 1):
@@ -2453,8 +2553,12 @@ def cli(argv=None):
                     log.write({"event": "unconfirmed", "index": index, "error": str(exc)})
                     raise
                 log.write({"event": "confirmed", "index": index, "report": report})
-                print(f"[{index}/{count if count else 'liên tục'}] Google xác nhận đã lưu.", flush=True)
+                print(f"[{index}/{count if count else 'liên tục'}] Biểu mẫu xác nhận đã lưu.", flush=True)
             print("Hoàn tất.")
+            if args.spss_out:
+                from spss_export import export_spss
+                target = export_spss(schema, log.path, args.spss_out)
+                print(f"Dữ liệu SPSS: {target.resolve()}")
         return 0
     except (KeyboardInterrupt, EOFError):
         print("\nĐã dừng. Các lượt đã được xác nhận nằm trong nhật ký.", file=sys.stderr)

@@ -37,6 +37,8 @@ logs/
 answers.json
 responses.json
 form_da_dien.html
+*.sav
+*.zsav
 
 # Local Vercel and dependency state
 .vercel/
