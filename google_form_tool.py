@@ -356,11 +356,23 @@ class KeyStore:
 
     def initialize(self, legacy):
         with self.connection() as connection:
+            if not self.database_url:
+                self.execute(connection, "BEGIN IMMEDIATE")
             self.execute(connection, """CREATE TABLE IF NOT EXISTS kd_access_keys (
                 name TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL,
                 created_at DOUBLE PRECISION NOT NULL, claimed_at DOUBLE PRECISION,
-                claimed_job TEXT, finished_at DOUBLE PRECISION, outcome TEXT
+                claimed_job TEXT, finished_at DOUBLE PRECISION, outcome TEXT,
+                activated_at DOUBLE PRECISION, activation_id TEXT
             )""")
+            if self.database_url:
+                self.execute(connection, "ALTER TABLE kd_access_keys ADD COLUMN IF NOT EXISTS activated_at DOUBLE PRECISION")
+                self.execute(connection, "ALTER TABLE kd_access_keys ADD COLUMN IF NOT EXISTS activation_id TEXT")
+            else:
+                columns = {row["name"] for row in self.execute(connection, "PRAGMA table_info(kd_access_keys)").fetchall()}
+                if "activated_at" not in columns:
+                    self.execute(connection, "ALTER TABLE kd_access_keys ADD COLUMN activated_at DOUBLE PRECISION")
+                if "activation_id" not in columns:
+                    self.execute(connection, "ALTER TABLE kd_access_keys ADD COLUMN activation_id TEXT")
             self.execute(connection, "CREATE TABLE IF NOT EXISTS kd_key_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
             inserted = self.execute(connection,
                 "INSERT INTO kd_key_meta (name, value) VALUES (?, ?) ON CONFLICT (name) DO NOTHING",
@@ -393,7 +405,7 @@ class KeyStore:
     def unused_by_hash(self, digest):
         with self.connection() as connection:
             row = self.execute(connection,
-                "SELECT * FROM kd_access_keys WHERE sha256 = ? AND enabled = 1 AND claimed_job IS NULL",
+                "SELECT * FROM kd_access_keys WHERE sha256 = ? AND enabled = 1 AND claimed_job IS NULL AND activated_at IS NULL AND activation_id IS NULL",
                 (digest,)).fetchone()
         return dict(row) if row else None
 
@@ -415,7 +427,8 @@ class KeyStore:
             for record in records:
                 if rotate:
                     cursor = self.execute(connection, """UPDATE kd_access_keys SET sha256 = ?, enabled = 1,
-                        created_at = ?, claimed_at = NULL, claimed_job = NULL, finished_at = NULL, outcome = NULL
+                        created_at = ?, claimed_at = NULL, claimed_job = NULL, finished_at = NULL, outcome = NULL,
+                        activated_at = NULL, activation_id = NULL
                         WHERE name = ?""", (access_key_hash(record["key"]), record["created_at"], record["name"]))
                 else:
                     cursor = self.execute(connection,
@@ -442,12 +455,23 @@ class KeyStore:
                 raise FormError("Không tìm thấy tên key: " + name)
         self.clear_cache()
 
-    def claim(self, name, digest, job_id):
-        # CHỈ DÙNG MỘT LẦN: cập nhật có điều kiện trong CSDL; hai tiến trình không thể cùng nhận một key.
+    def activate(self, digest, activation_id):
+        # CHỈ DÙNG MỘT LẦN: key được tiêu thụ ngay khi kích hoạt, kể cả khi chưa bắt đầu chạy form.
+        with self.connection() as connection:
+            cursor = self.execute(connection, """UPDATE kd_access_keys
+                SET activated_at = ?, activation_id = ?, outcome = 'activated'
+                WHERE sha256 = ? AND enabled = 1 AND claimed_job IS NULL
+                AND activated_at IS NULL AND activation_id IS NULL""", (time.time(), activation_id, digest))
+            row = self.execute(connection, "SELECT * FROM kd_access_keys WHERE sha256 = ?", (digest,)).fetchone() if cursor.rowcount == 1 else None
+        self.clear_cache()
+        return dict(row) if row else None
+
+    def claim(self, name, digest, job_id, activation_id):
         with self.connection() as connection:
             cursor = self.execute(connection, """UPDATE kd_access_keys SET claimed_at = ?, claimed_job = ?, outcome = 'running'
-                WHERE name = ? AND sha256 = ? AND enabled = 1 AND claimed_job IS NULL""",
-                (time.time(), job_id, name, digest))
+                WHERE name = ? AND sha256 = ? AND enabled = 1 AND claimed_job IS NULL
+                AND activated_at IS NOT NULL AND activation_id = ?""",
+                (time.time(), job_id, name, digest, activation_id))
             if cursor.rowcount != 1:
                 raise KeyAlreadyUsed("Key đã được dùng cho một đợt chạy, đã bị khóa hoặc đã thay đổi. Vui lòng nhập key mới.")
         self.clear_cache()
@@ -484,8 +508,9 @@ def manage_access_keys(args):
     if args.key_list:
         rows = store.list()
         for item in rows:
-            status = "KHÓA" if not item["enabled"] else "CHƯA DÙNG" if not item["claimed_job"] else "ĐÃ DÙNG"
-            count = "1/1" if item["claimed_job"] else "0/1"
+            used = item["activated_at"] is not None or bool(item["claimed_job"])
+            status = "KHÓA" if not item["enabled"] else "ĐÃ DÙNG" if used else "CHƯA DÙNG"
+            count = "1/1" if used else "0/1"
             print(f'{item["name"]}: {status} · {count}' + (f' · {item["outcome"]}' if item["outcome"] else ""))
         if not rows:
             print("Chưa có key. Tạo bằng --key-generate 1.")
@@ -527,13 +552,14 @@ class AccessSessions:
             if len(attempts) >= 6:
                 return None, None, max(1, math.ceil(60 - (now - attempts[0])))
         supplied = access_key_hash(key)
-        item = self.key_store.unused_by_hash(supplied)
+        token = secrets.token_urlsafe(32)
+        activation_id = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        item = self.key_store.activate(supplied, activation_id)
         if item is None:
             with self.lock:
                 self.attempts.setdefault(client, []).append(now)
             return None, None, 0
-        token = secrets.token_urlsafe(32)
-        record = {"key_id": item["name"], "key_hash": supplied, "expires": now + 12 * 3600}
+        record = {"key_id": item["name"], "key_hash": supplied, "activation_id": activation_id, "expires": now + 12 * 3600}
         with self.lock:
             self.attempts.pop(client, None)
             self.sessions[token] = record
@@ -554,7 +580,8 @@ class AccessSessions:
             return None
         item = self.key_store.get(record["key_id"])
         valid = (record["expires"] > time.time() and item and item["enabled"]
-                 and secrets.compare_digest(item["sha256"], record["key_hash"]))
+                 and secrets.compare_digest(item["sha256"], record["key_hash"])
+                 and secrets.compare_digest(str(item["activation_id"] or ""), record["activation_id"]))
         if not valid:
             with self.lock:
                 self.sessions.pop(token, None)
@@ -578,7 +605,8 @@ def active_job_key(job, key_store=None):
     if not name:
         return False
     item = (key_store or configured_key_store()).get(name)
-    valid = bool(item and item["enabled"] and secrets.compare_digest(item["sha256"], job["access_key_hash"]))
+    valid = bool(item and item["enabled"] and secrets.compare_digest(item["sha256"], job["access_key_hash"])
+                 and secrets.compare_digest(str(item["activation_id"] or ""), job.get("access_activation_id", "")))
     if not valid:
         return False
     return item["claimed_job"] == job["id"] if job["mode"] == "send" else not item["claimed_job"]
@@ -1407,7 +1435,7 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <div class="access-brand"><span class="brand-mark"><svg class="icon"><use href="#i-form"/></svg></span><strong>KDautoform</strong></div>
 <div class="access-badge"><svg class="icon"><use href="#i-shield"/></svg>KÍCH HOẠT CÔNG CỤ</div>
 <h1 id="accessTitle">Nhập key để bắt đầu.</h1>
-<p class="access-description">Mỗi key dùng cho một đợt chạy. Bạn có thể đọc form, chỉnh tỷ lệ và điền thử trước khi bắt đầu.</p>
+<p class="access-description">Mỗi key kích hoạt đúng một lần. Tải lại trang bằng F5 hoặc đăng xuất sẽ cần key mới.</p>
 <form id="accessForm">
 <label class="label" for="accessKey">Key sử dụng</label>
 <div class="access-input"><input id="accessKey" type="password" required maxlength="256" placeholder="KD-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" autocomplete="off" spellcheck="false" autocapitalize="characters" aria-describedby="accessHint accessError"><button type="button" id="toggleKey" aria-label="Hiện key" aria-pressed="false">Hiện</button></div>
@@ -1534,8 +1562,8 @@ $("accessGate").hidden=true;$("workspaceApp").hidden=false;$("workspaceApp").ine
 $("accessError").textContent="";$("accessKey").value="";$("accessKey").removeAttribute("aria-invalid");$("logoutKey").title="Key: "+info.key_name+" · Đổi key";
 await init();
 }
-async function authInit(){
-try{const info=await api("/api/auth/status");if(info.authenticated)await unlockAccess(info);else lockAccess()}catch(error){lockAccess(error.message)}
+function authInit(){
+try{for(const name of ["formpilot.scan","formpilot.job","formpilot.draft"])localStorage.removeItem(name)}catch{}lockAccess();
 }
 function normalizeKey(value){
 const text=String(value||"").normalize("NFKC").replace(/[‐‑‒–—―−﹣－]/g,"-").replace(/[\s\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g,"").toUpperCase();
@@ -1552,7 +1580,7 @@ $("accessKey").addEventListener("input",()=>{$("accessKey").removeAttribute("ari
 $("toggleKey").addEventListener("click",()=>{const show=$("accessKey").type==="password";$("accessKey").type=show?"text":"password";$("toggleKey").textContent=show?"Ẩn":"Hiện";$("toggleKey").setAttribute("aria-pressed",String(show));$("accessKey").focus()});
 $("logoutKey").addEventListener("click",async()=>{try{await api("/api/auth/logout",{});lockAccess()}catch(error){toast(error.message)}});
 
-window.addEventListener("beforeunload",()=>{clearInterval(state.autoTimer);clearTimeout(state.pollTimer)});authInit();
+window.addEventListener("beforeunload",()=>{clearInterval(state.autoTimer);clearTimeout(state.pollTimer)});window.addEventListener("pageshow",event=>{if(event.persisted)location.reload()});authInit();
 </script>
 </body></html>"""
 
@@ -1795,7 +1823,7 @@ class WebApplication:
             job = self.jobs.get(job_id)
             if job is None:
                 raise FormError("Không tìm thấy lượt chạy.")
-            return json.loads(json.dumps({key: value for key, value in job.items() if key not in ("stop_event", "schema", "config", "access_key_hash")}, ensure_ascii=False))
+            return json.loads(json.dumps({key: value for key, value in job.items() if key not in ("stop_event", "schema", "config", "access_key_hash", "access_activation_id")}, ensure_ascii=False))
 
     def event(self, job, message, level="info"):
         with self.lock:
@@ -1826,6 +1854,7 @@ class WebApplication:
                "headless": self.headless_only or bool(payload.get("headless", True)), "stop_event": threading.Event(),
                "created_at": time.time(), "updated_at": time.time(), "title": state["schema"]["title"],
                "seed": secrets.randbits(48), "access_key_id": payload.get("_key_id"),
+               "access_activation_id": payload.get("_activation_id", ""),
                "access_key_hash": payload.get("_key_hash", ""), "exact": count > 0 and not state["schema"]["branching"]
                and not any(field["exclusive_columns"] for field in state["schema"]["fields"])}
         with self.lock:
@@ -1836,10 +1865,12 @@ class WebApplication:
             if not job["access_key_id"]:
                 raise FormError("Vui lòng nhập key hợp lệ trước khi bắt đầu.")
             if mode == "send":
-                self.key_store.claim(job["access_key_id"], job["access_key_hash"], job_id)
+                self.key_store.claim(job["access_key_id"], job["access_key_hash"], job_id, job["access_activation_id"])
             else:
                 item = self.key_store.get(job["access_key_id"])
-                if not item or item["claimed_job"]:
+                if (not item or not item["enabled"] or item["claimed_job"]
+                        or not secrets.compare_digest(item["sha256"], job["access_key_hash"])
+                        or not secrets.compare_digest(str(item["activation_id"] or ""), job["access_activation_id"])):
                     raise KeyAlreadyUsed("Key đã dùng. Vui lòng nhập key mới.")
             self.jobs[job_id] = job
             self.scans[state["id"]]["config"] = config
@@ -2032,7 +2063,10 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     self.reply(200, {"ok": True, "name": "KDautoform"})
                     return
                 if path == "/":
-                    self.reply(200, live_settings()["html"].replace("__APP_TOKEN__", app.token), "text/html; charset=utf-8")
+                    # F5 hoặc mở lại trang: hủy phiên cũ trên máy chủ và xóa cookie đăng nhập.
+                    access.logout(self.headers.get("Cookie"))
+                    self.reply(200, live_settings()["html"].replace("__APP_TOKEN__", app.token), "text/html; charset=utf-8",
+                               headers={"Set-Cookie": self.access_cookie("", 0)})
                     return
                 if path == "/api/auth/status":
                     session = access.current(self.headers.get("Cookie"))
@@ -2044,7 +2078,7 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                 if session is None:
                     return
                 if path == "/api/state":
-                    self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only, "version": "4.0", "name": "KDautoform", "key_used": session["key_used"]})
+                    self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only, "version": "4.1", "name": "KDautoform", "key_used": session["key_used"]})
                 elif path.startswith("/api/scans/"):
                     scan_id = path.rsplit("/", 1)[-1]
                     self.require_owner("scan", scan_id, session)
@@ -2103,7 +2137,7 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                         self.reply(200, {"authenticated": True, "key_name": record["key_id"]},
                                    headers={"Set-Cookie": self.access_cookie(token, 43200)})
                     else:
-                        self.reply(401, {"error": "Key không đúng, đã bị khóa hoặc đã dùng cho một đợt chạy. Vui lòng dùng key mới."})
+                        self.reply(401, {"error": "Key không đúng, đã bị khóa hoặc đã kích hoạt trước đó. Vui lòng dùng key mới."})
                     return
                 if path == "/api/auth/logout":
                     access.logout(self.headers.get("Cookie"))
@@ -2124,6 +2158,7 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     self.require_owner("scan", str(payload.get("scan_id", "")), session)
                     payload["_key_id"] = session["key_id"]
                     payload["_key_hash"] = session["key_hash"]
+                    payload["_activation_id"] = session["activation_id"]
                     self.reply(202, app.start_job(payload))
                 elif path.startswith("/api/jobs/") and path.endswith("/stop"):
                     job_id = path.split("/")[3]

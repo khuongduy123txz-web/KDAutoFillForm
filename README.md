@@ -81,16 +81,20 @@ Thay địa chỉ ví dụ bằng địa chỉ thật; không thêm `/api` hoặ
 
 Không cần đặt key người dùng vào biến môi trường. Source chỉ lưu mã băm SHA-256 của key; giữ riêng chuỗi key dùng đăng nhập.
 
-## Key dùng cho một đợt chạy
+## Key kích hoạt một lần và F5 quay về trang nhập key
 
-**Một key = một đợt chạy**, ví dụ một đợt có 100 lượt điền, không phải một phản hồi Google Form.
+**Một key chỉ kích hoạt thành công đúng một lần.** Trong trang vừa kích hoạt, bạn được đọc form, điền thử và thực hiện tối đa một đợt gửi thật, ví dụ một đợt có 100 lượt điền.
 
-- Đăng nhập, đọc form, chỉnh tỷ lệ và **Điền thử** chưa tiêu thụ key.
-- Bắt đầu **gửi thật**: key được ghi nhận cho đúng đợt đó trong CSDL. Hai trình duyệt hoặc hai máy chủ không thể mở hai đợt bằng một key.
-- Hoàn tất, dừng, lỗi hoặc restart giữa đợt đều không hoàn lại key; cần cấp mã mới.
-- Phiên hiện tại vẫn xem kết quả và tải nhật ký được sau khi key đã dùng. Nút chính đổi thành **Nhập key mới**. Đăng nhập lại bằng key đã dùng bị từ chối.
-- Phiên đăng nhập tối đa 12 giờ. Đăng xuất trước khi chạy thật không làm mất lượt.
-- Mở khóa không xóa lịch sử đã dùng. Đổi key cấp mã khác và làm mã cũ hết hiệu lực.
+- Bấm **Kích hoạt KDautoform** thành công là key đã chuyển sang trạng thái `1/1`, kể cả khi chưa chạy form.
+- **F5, Ctrl+R, mở lại URL hoặc đăng xuất** sẽ quay về màn hình nhập key. Key cũ không đăng nhập lại được; cần key mới.
+- Hai trình duyệt hoặc hai máy chủ nhập đồng thời cùng một key chỉ có một lần kích hoạt thành công.
+- Trong trang đang mở, **Điền thử** không bắt đầu đợt gửi thật. Bạn vẫn có thể điều chỉnh tỷ lệ trước khi gửi.
+- Sau đợt gửi thật, trang hiện tại vẫn xem kết quả và tải nhật ký được; muốn chạy đợt khác phải nhập key mới.
+- Phiên trên trang hiện tại có thời hạn tối đa 12 giờ; hết phiên cũng cần key mới.
+- Mở khóa không xóa lịch sử kích hoạt. Đổi key cấp mã khác và làm mã cũ hết hiệu lực.
+- Nếu F5 khi đợt chạy đang diễn ra, giao diện bị đăng xuất nhưng đợt đang chạy vẫn tiếp tục trên máy chủ. Trang mới không tự gửi lại form.
+
+CSDL SQLite/PostgreSQL cũ được tự thêm các cột theo dõi kích hoạt khi khởi động bản mới. Giữ nguyên CSDL đang dùng; không cần xóa bảng hoặc tạo lại kho key. Các key đã dùng cho đợt chạy ở bản cũ vẫn bị từ chối.
 
 ### 1. Tạo key trong Terminal
 
@@ -149,7 +153,7 @@ KD_KEY_DB_PATH=D:/KDautoform/data/access_keys.sqlite3
 KD_KEY_EXPORT_DIR=D:/KDautoform/private_keys
 ```
 
-Comment **CHỈ DÙNG MỘT LẦN** ở hàm `KeyStore.claim` đánh dấu câu SQL giữ key cho một đợt.
+Comment **CHỈ DÙNG MỘT LẦN** ở hàm `KeyStore.activate` đánh dấu câu SQL tiêu thụ key ngay khi kích hoạt. Hàm `KeyStore.claim` chỉ cho phiên đã kích hoạt mở một đợt gửi thật.
 
 `LEGACY_ACCESS_KEYS` là mã băm ba key cũ, chỉ nhập một lần khi tạo kho SQLite local đầu tiên. Sửa mục đó không thêm/sửa key trong kho đang dùng. Từ nay dùng lệnh quản lý. PostgreSQL mới không tự nạp ba key cũ; hãy tạo key mới trong đúng kho cloud.
 
@@ -169,7 +173,7 @@ python google_form_tool.py --key-delete khach-04
 ```
 
 - `--key-paths`: in kho đang dùng và thư mục CSV.
-- `--key-list`: `CHƯA DÙNG · 0/1` là còn lượt; `ĐÃ DÙNG · 1/1` là đã gắn một đợt; `KHÓA` là đang khóa.
+- `--key-list`: `CHƯA DÙNG · 0/1` là chưa kích hoạt; `ĐÃ DÙNG · 1/1` là đã kích hoạt hoặc đã chạy ở bản cũ; `KHÓA` là đang khóa.
 - `--key-disable`: khóa key; phiên/lượt chạy dừng ở lần kiểm tra quyền tiếp theo.
 - `--key-enable`: mở lại, không khôi phục lượt đã dùng.
 - `--key-rotate`: cấp mã mới cho cùng tên và lưu CSV mới; mã cũ, phiên cũ hết hiệu lực.
@@ -181,11 +185,11 @@ Các lệnh không chỉnh source và **không cần git push/redeploy**, miễn
 
 1. Tạo key bằng Terminal.
 2. Sao chép mã `KD-...` từ Terminal hoặc CSV.
-3. Mở KDautoform, nhập key.
+3. Mở KDautoform, nhập key rồi bấm kích hoạt. Từ lúc này key đã dùng một lần.
 4. Dán link form được phép kiểm thử, chọn số lượt và tỷ lệ.
-5. Bấm **Điền thử** nếu cần; chưa mất key.
-6. Bắt đầu gửi thật: key gắn với đợt này. Hoàn tất thì tải nhật ký.
-7. Chạy đợt khác: bấm **Nhập key mới** rồi dùng key mới.
+5. Bấm **Điền thử** nếu cần; phiên hiện tại vẫn được phép bắt đầu một đợt gửi thật.
+6. Bắt đầu gửi thật. Hoàn tất thì tải nhật ký trước khi rời trang.
+7. F5 hoặc chạy đợt khác: dùng key mới. Key vừa kích hoạt không dùng lại được dù bạn chưa chạy form.
 
 Key không giới hạn sẵn số phản hồi. Số lượng `0` vẫn là một đợt liên tục đến khi dừng.
 
@@ -277,7 +281,8 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 | `No open ports detected` | Kiểm tra CMD không bị ghi đè, `KD_HOST=0.0.0.0`, `PORT` hợp lệ. Log cần có dòng đang lắng nghe. |
 | `Thiếu URL công khai` | Đặt `KD_PUBLIC_URL` bằng URL HTTPS service nếu nền tảng không cấp `RENDER_EXTERNAL_URL`. |
 | `Phiên truy cập không hợp lệ` | Tải lại trang; kiểm tra `KD_PUBLIC_URL`/`KD_ALLOWED_ORIGINS` khớp chính xác thanh địa chỉ, gồm cả HTTPS. |
-| Key không đúng hoặc đã dùng | Dùng chuỗi `KD-...`; kiểm tra trạng thái `0/1` bằng `--key-list`, kho Terminal và Render phải cùng PostgreSQL. Đợt đã chạy cần key mới. |
+| Key không đúng hoặc đã dùng | Dùng chuỗi `KD-...`; kiểm tra trạng thái `0/1` bằng `--key-list`, kho Terminal và Render phải cùng PostgreSQL. Key đã kích hoạt cần được thay bằng key mới. |
+| Bấm F5 bị yêu cầu nhập key mới | Đây là cách hoạt động của bản mới: tải lại trang hủy phiên đăng nhập, key cũ đã tiêu thụ ngay từ lần kích hoạt đầu tiên. |
 | Cloud cần KD_DATABASE_URL | Thêm chuỗi PostgreSQL vào Render Environment; không dùng SQLite tạm trên Render Free. |
 | Không mở được Chromium | Runtime cần là Docker, Dockerfile đã chạy `playwright install --with-deps --only-shell chromium`. |
 | Web khởi động chậm sau khi để lâu | Gói Free đang thức dậy; đợi khởi động xong. |

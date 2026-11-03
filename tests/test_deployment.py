@@ -170,7 +170,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertTrue(second["key_used"])
             self.assertEqual(self.request("POST", "/api/auth/login", {"key": self.raw_key})[0], 401)
 
-    def test_preview_does_not_consume_key(self):
+    def test_preview_does_not_claim_the_one_send_batch(self):
         self.login()
         payload = self.seed_scan()
         payload["mode"] = "check"
@@ -182,6 +182,30 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(status, 202, result)
             self.assertFalse(result["key_used"])
             self.assertIsNone(self.store.get("qa")["claimed_job"])
+            self.assertIsNotNone(self.store.get("qa")["activated_at"])
+
+    def test_login_key_cannot_be_activated_twice_before_any_job(self):
+        self.login()
+        self.assertEqual(self.request("POST", "/api/auth/login", {"key": self.raw_key})[0], 401)
+        self.assertEqual(self.request("GET", "/api/state")[0], 200)
+        self.assertIsNone(self.store.get("qa")["claimed_job"])
+
+    def test_refresh_revokes_cookie_and_requires_a_new_key(self):
+        self.login()
+        self.assertEqual(self.request("GET", "/api/state")[0], 200)
+        status, headers, _ = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("Max-Age=0", headers["Set-Cookie"])
+        self.assertEqual(self.request("GET", "/api/state")[0], 401)
+        self.assertFalse(self.request("GET", "/api/auth/status")[2]["authenticated"])
+        self.assertEqual(self.request("POST", "/api/auth/login", {"key": self.raw_key})[0], 401)
+        records, _ = self.store.issue(["new-key"])
+        self.assertEqual(self.request("POST", "/api/auth/login", {"key": records[0]["key"]})[0], 200)
+
+    def test_health_check_does_not_log_out_current_page(self):
+        self.login()
+        self.assertEqual(self.request("GET", "/healthz")[0], 200)
+        self.assertEqual(self.request("GET", "/api/state")[0], 200)
 
     def test_invalid_cloud_configuration_reports_clear_error(self):
         base = {"KD_CLOUD": "1", "RENDER_EXTERNAL_URL": "", "KD_ALLOWED_ORIGINS": "",
