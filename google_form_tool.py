@@ -332,6 +332,7 @@ class KeyStore:
         self.export_dir = Path(export_dir or os.environ.get("KD_KEY_EXPORT_DIR") or KEY_EXPORT_DIR).expanduser().resolve()
         self.cache_lock = threading.RLock()
         self.cache = {}
+        self.guest_cache = {}
         self.initialize(legacy or {})
 
     def connection(self):
@@ -421,6 +422,7 @@ class KeyStore:
     def clear_cache(self):
         with self.cache_lock:
             self.cache.clear()
+            self.guest_cache.clear()
 
     def get(self, name):
         with self.cache_lock:
@@ -510,23 +512,64 @@ class KeyStore:
         with self.connection() as connection:
             self.execute(connection, """INSERT INTO kd_guest_usage (guest_id, used, created_at)
                 VALUES (?, 0, ?) ON CONFLICT (guest_id) DO NOTHING""", (guest_id, time.time()))
-        return self.guest_usage(guest_id)
+        with self.cache_lock:
+            self.guest_cache.pop(guest_id, None)
+        return self.guest_usage(guest_id, fresh=True)
 
-    def guest_usage(self, guest_id):
+    def guest_usage(self, guest_id, fresh=False):
+        started = time.monotonic()
+        if not fresh:
+            with self.cache_lock:
+                cached = self.guest_cache.get(guest_id)
+                if cached and cached[0] > started:
+                    return dict(cached[1]) if cached[1] is not None else None
         with self.connection() as connection:
             row = self.execute(connection, "SELECT used FROM kd_guest_usage WHERE guest_id = ?", (guest_id,)).fetchone()
-        if row is None:
-            return None
-        return {"limit": FREE_LIMIT, "used": row["used"], "remaining": max(0, FREE_LIMIT - row["used"])}
+        result = None if row is None else {"limit": FREE_LIMIT, "used": row["used"], "remaining": max(0, FREE_LIMIT - row["used"])}
+        with self.cache_lock:
+            cached = self.guest_cache.get(guest_id)
+            # Do not overwrite a quota update that committed while this read was in flight.
+            if cached and cached[2] > started:
+                return dict(cached[1]) if cached[1] is not None else None
+            now = time.monotonic()
+            if guest_id not in self.guest_cache and len(self.guest_cache) >= 2048:
+                self.guest_cache.pop(next(iter(self.guest_cache)))
+            self.guest_cache[guest_id] = (now + 1, result, now)
+        return dict(result) if result is not None else None
 
     def consume_guest(self, guest_id):
         # TRỪ LƯỢT: ghi bền vững NGAY TRƯỚC khi bấm Gửi; lỗi xác nhận vẫn tính một lần gửi.
         with self.connection() as connection:
-            cursor = self.execute(connection, "UPDATE kd_guest_usage SET used = used + 1 WHERE guest_id = ? AND used < ?",
-                                  (guest_id, FREE_LIMIT))
-            if cursor.rowcount != 1:
+            row = self.execute(connection, "UPDATE kd_guest_usage SET used = used + 1 WHERE guest_id = ? AND used < ? RETURNING used",
+                               (guest_id, FREE_LIMIT)).fetchone()
+            if row is None:
                 raise QuotaExceeded("Bạn đã dùng hết 10 lượt miễn phí. Mua key unlimited 30.000đ/key để tiếp tục.")
-        return self.guest_usage(guest_id)
+        result = {"limit": FREE_LIMIT, "used": row["used"], "remaining": max(0, FREE_LIMIT - row["used"])}
+        with self.cache_lock:
+            cached = self.guest_cache.get(guest_id)
+            if not cached or cached[1] is None or cached[1]["used"] <= result["used"]:
+                now = time.monotonic()
+                if guest_id not in self.guest_cache and len(self.guest_cache) >= 2048:
+                    self.guest_cache.pop(next(iter(self.guest_cache)))
+                self.guest_cache[guest_id] = (now + 1, dict(result), now)
+        return result
+
+    def release_guest(self, guest_id):
+        # Worker-only: return a reserved slot only when no submit attempt began.
+        with self.connection() as connection:
+            row = self.execute(connection,
+                               "UPDATE kd_guest_usage SET used = used - 1 WHERE guest_id = ? AND used > 0 RETURNING used",
+                               (guest_id,)).fetchone()
+        result = None if row is None else {"limit": FREE_LIMIT, "used": row["used"], "remaining": max(0, FREE_LIMIT - row["used"])}
+        with self.cache_lock:
+            if result is None:
+                self.guest_cache.pop(guest_id, None)
+            else:
+                now = time.monotonic()
+                if guest_id not in self.guest_cache and len(self.guest_cache) >= 2048:
+                    self.guest_cache.pop(next(iter(self.guest_cache)))
+                self.guest_cache[guest_id] = (now + 1, dict(result), now)
+        return result
 
     def finish(self, name, digest, job_id, outcome):
         with self.connection() as connection:
@@ -1481,6 +1524,8 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 .provider-chips{display:flex;gap:7px;flex-wrap:wrap;margin:-4px 0 18px}.provider-chips span{font-size:10px;border-radius:20px;padding:4px 9px;border:1px solid #ecdadd;background:#fffbfa;color:#825a64}.provider-chips span:last-child{color:#236f58;background:#f0f8f3;border-color:#d9eade}.spss-download{display:flex;margin-top:11px;font-weight:650}.spss-download[aria-busy=true]{opacity:.6;pointer-events:none}.spss-note{font-size:10px;line-height:1.7;color:#78606b;margin:7px 0 0}@media(max-width:550px){.input-grid{grid-template-columns:1fr}.quantity{max-width:200px}.provider-chips{gap:5px}.provider-chips span{font-size:9px}}
 .provider-section{margin:0 0 22px}.provider-tabs{display:grid;grid-template-columns:1.25fr 1fr 1fr;gap:9px}.provider-tabs button{text-align:left;padding:15px 18px;border:1px solid #e7d7da;background:white;border-radius:12px;color:#775360;min-height:66px}.provider-tabs strong{display:block;font-size:13px;letter-spacing:-.15px}.provider-tabs small{display:block;font-size:10px;margin-top:4px;color:#88717b}.provider-tabs button[aria-selected=true]{background:#fff0ef;border-color:#ca6972;color:#a81f2e;box-shadow:inset 0 2px 0 #c52c38}.provider-panel{padding:13px 17px 0}.provider-panel strong{font-size:12px;color:#71545e}.provider-panel p{font-size:11px;line-height:1.75;margin:5px 0 0;color:#78606a;max-width:900px}.provider-tabs button:hover:not(:disabled){border-color:#c66370}@media(max-width:550px){.provider-tabs{gap:5px;grid-template-columns:1.1fr 1fr 1fr}.provider-tabs button{padding:12px 9px;min-height:72px}.provider-tabs strong{font-size:11px}.provider-tabs small{font-size:9px;line-height:1.5}.provider-panel{padding:12px 5px 0}.provider-panel strong{font-size:11px}.provider-panel p{font-size:10px}}
+.run-settings{border-top:1px solid #efe1e2;margin-top:18px;padding-top:15px}.run-settings summary{font-size:12px;color:#795361;font-weight:650;cursor:pointer;min-height:32px}.run-options{display:grid;grid-template-columns:1.65fr .8fr .8fr 1.2fr;gap:12px;margin-top:12px}.run-options input,.run-options select{width:100%;min-width:0;background:#fff;border:1px solid #dfd0d5;border-radius:9px;padding:9px 10px;height:42px;font-size:12px;color:#583c48}.run-options input:disabled{background:#f7f1f1;color:#99848b}.run-hint{font-size:10px;line-height:1.7;color:#806570;margin:10px 0 0}.run-hint+.run-hint{margin-top:3px}.duration-estimate{font-size:11px;font-weight:600;color:#754854;line-height:1.7;margin:10px 0 0}.academic-tools{display:flex;align-items:center;gap:12px;background:#f7f4ee;border:1px solid #ebe2d1;border-radius:12px;padding:13px 15px;margin-bottom:15px}.academic-tools>div{flex:1}.academic-tools strong{font-size:11px;color:#695541}.academic-tools p{font-size:10px;color:#81705e;margin:4px 0 0;line-height:1.6}.academic-tools select{max-width:185px;min-width:0;border:1px solid #dfd4c4;border-radius:8px;background:white;font-size:11px;padding:8px;color:#6c5443;min-height:37px}.pause-run{display:block;border:1px solid #d9a6ae;background:#fff8f6;color:#a32839;font-size:12px;font-weight:650;min-height:40px;border-radius:9px;width:100%;margin-top:11px}.run-meta{font-size:10px;line-height:1.7;color:#806470;margin:10px 0 0;overflow-wrap:anywhere}.stats-panel{margin-top:25px;padding:21px 24px}.stats-panel>summary{font-size:15px;font-weight:650;cursor:pointer;color:#573644;min-height:32px}.stats-note{font-size:11px;line-height:1.8;color:#7c626e;max-width:900px;margin:12px 0}.report-content{margin-top:15px;font-size:12px;color:#735361;overflow-x:auto}.stats-table{width:100%;border-collapse:collapse;font-size:11px;min-width:570px}.stats-table th,.stats-table td{padding:10px;border-bottom:1px solid #eee3e6;text-align:right;vertical-align:top}.stats-table th:first-child,.stats-table td:first-child{text-align:left;max-width:450px}.stats-table thead{background:#fcf3f2}.stats-table details{margin-top:6px;font-size:10px;color:#806570}.stats-table details p{margin:5px 0}.status-chip.paused{background:#fff0c9;color:#806316}.status-chip.waiting{background:#eceff9;color:#4e5d91}@media(max-width:790px){.run-options{grid-template-columns:1fr 1fr}.run-options>div:first-child{grid-column:1/-1}.run-options>div:last-child{grid-column:1/-1}.academic-tools{flex-wrap:wrap}.academic-tools>div{flex-basis:100%}.academic-tools select{flex:1;max-width:none;min-height:44px}.academic-tools button{min-height:44px}.stats-panel{padding:18px}.run-options .label{font-size:11px}}
+@media(min-width:791px){.run-options{grid-template-columns:1.6fr .75fr .75fr 1fr 1fr;align-items:end}}@media(max-width:790px){.run-options>div:last-child{grid-column:auto}}
 </style>
 </head>
 <body>
@@ -1529,7 +1574,7 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <nav class="header-links" aria-label="Điều hướng"><a href="#setupTitle">Công cụ</a><a href="#contact">Liên hệ</a></nav><div class="contact-nav"><button id="logoutKey" type="button" class="contact-link key-session" aria-label="Nhập key unlimited"><svg class="icon"><use href="#i-shield"/></svg><span>Nhập key</span></button><a class="contact-link" href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span><span class="phone-label">0343415673</span></a><a class="contact-link" href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span><span>Facebook</span></a></div>
 </div></header>
 <main id="mainContent" tabindex="-1">
-<section class="intro"><div class="hero-copy"><div class="eyebrow">GOOGLE FORMS · NỀN TẢNG CHÍNH</div><h1>Một đường link.<br><span>Chủ động mọi tỷ lệ.</span></h1><p>Đọc toàn bộ biểu mẫu, tùy chỉnh từng đáp án và theo dõi tiến trình ở một nơi. Bắt đầu ngay với 10 lượt miễn phí.</p><div class="hero-actions"><a class="hero-start" href="#setupTitle">Dùng thử miễn phí <svg class="icon"><use href="#i-arrow"/></svg></a><span>Không cần tài khoản</span></div></div><aside class="hero-offer" aria-label="Gói unlimited"><div class="offer-label"><svg class="icon"><use href="#i-spark"/></svg>THÊM TỰ DO CHO MỖI LƯỢT CHẠY</div><h2>Unlimited.</h2><p>Một key. Không giới hạn lượt điền.</p><div class="offer-price">30.000<span>đ / key</span></div><button type="button" id="heroUpgrade">Mua key &amp; mở khóa <svg class="icon"><use href="#i-arrow"/></svg></button><small>Liên hệ trực tiếp qua Facebook hoặc Zalo</small></aside></section>
+<section class="intro"><div class="hero-copy"><div class="eyebrow">GOOGLE FORMS · NỀN TẢNG CHÍNH</div><h1>Một đường link.<br><span>Chủ động mọi tỷ lệ.</span></h1><p>Không gian thực hành cho học sinh, sinh viên và giảng viên: kiểm thử biểu mẫu, mô phỏng dữ liệu và học cách đọc thống kê. Bắt đầu với 10 lượt miễn phí.</p><div class="hero-actions"><a class="hero-start" href="#setupTitle">Dùng thử miễn phí <svg class="icon"><use href="#i-arrow"/></svg></a><span>Không cần tài khoản</span></div></div><aside class="hero-offer" aria-label="Gói unlimited"><div class="offer-label"><svg class="icon"><use href="#i-spark"/></svg>THÊM TỰ DO CHO MỖI LƯỢT CHẠY</div><h2>Unlimited.</h2><p>Một key. Không giới hạn lượt điền.</p><div class="offer-price">30.000<span>đ / key</span></div><button type="button" id="heroUpgrade">Mua key &amp; mở khóa <svg class="icon"><use href="#i-arrow"/></svg></button><small>Liên hệ trực tiếp qua Facebook hoặc Zalo</small></aside></section>
 <section class="usage-strip" aria-label="Hạn mức sử dụng"><div class="usage-heading"><span class="usage-icon"><svg class="icon"><use href="#i-shield"/></svg></span><div><strong id="planLabel">10 lượt miễn phí dành cho bạn</strong><p id="usageDetail">Đang kiểm tra hạn mức sử dụng...</p></div></div><div class="usage-meter"><span id="usageCount" aria-live="polite">— / 10 lượt</span><progress id="usageProgress" max="10" value="0" aria-label="Lượt miễn phí đã sử dụng"></progress></div><button type="button" id="upgradeButton">Mở khóa unlimited <svg class="icon"><use href="#i-arrow"/></svg></button></section>
 <ol class="how-it-works" aria-label="Ba bước sử dụng"><li><span>01</span><div><strong>Dán link biểu mẫu</strong><small>Tự đọc câu hỏi qua các trang</small></div></li><li><span>02</span><div><strong>Chọn tỷ lệ mong muốn</strong><small>Điều chỉnh hoặc tạo ngẫu nhiên</small></div></li><li><span>03</span><div><strong>Chạy &amp; theo dõi</strong><small>Xem kết quả, tải nhật ký</small></div></li></ol>
 <section class="provider-section" aria-label="Chọn loại biểu mẫu"><div class="provider-tabs" role="tablist" aria-label="Nền tảng biểu mẫu"><button type="button" id="tab-google" data-provider="google" role="tab" aria-controls="providerPanel" aria-selected="true" tabindex="0"><strong>Google Forms</strong><small>Phần chính · Đầy đủ tính năng</small></button><button type="button" id="tab-microsoft" data-provider="microsoft" role="tab" aria-controls="providerPanel" aria-selected="false" tabindex="-1"><strong>Microsoft Forms</strong><small>Form Microsoft công khai</small></button><button type="button" id="tab-html" data-provider="html" role="tab" aria-controls="providerPanel" aria-selected="false" tabindex="-1"><strong>Form web khác</strong><small>HTML chuẩn · Thử nghiệm</small></button></div><div id="providerPanel" class="provider-panel" role="tabpanel" aria-labelledby="tab-google"><strong id="providerHeading">Google Forms là phần chính của KDautoform</strong><p id="providerHelp">Giữ đầy đủ đọc nhiều trang, phân nhánh, tỷ lệ từng câu, câu trả lời tiếng Việt và nhật ký kết quả.</p></div></section>
@@ -1539,11 +1584,19 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <div class="input-grid"><div><label class="label" for="formUrl">Link Google Forms hoặc Microsoft Forms</label><div class="url-wrap"><svg class="icon"><use href="#i-link"/></svg><input id="formUrl" type="url" placeholder="Dán link docs.google.com/forms, forms.gle hoặc forms.office.com" autocomplete="off" spellcheck="false"><button id="scanAgain" class="scan-again" type="button">Đọc lại</button></div></div>
 <div><label class="label" for="quantity">Số lượng mong muốn</label><div class="quantity"><button type="button" id="minusCount" aria-label="Giảm số lượng">−</button><input id="quantity" type="number" min="1" max="10" step="1" value="10" aria-label="Số lượng mong muốn"><button type="button" id="plusCount" aria-label="Tăng số lượng">+</button></div></div></div>
 <div class="setup-bottom"><div id="scanStatus" class="scan-status" role="status" aria-live="polite"><svg class="icon"><use href="#i-shield"/></svg><span>Google Forms và Microsoft Forms công khai</span></div><span id="quantityHint" class="setup-tip">Tối đa 10 lượt miễn phí</span></div><p id="quantityError" class="quantity-error" role="status" hidden></p>
+<details class="run-settings" open><summary>Thời gian chạy &amp; tái tạo dữ liệu</summary><div class="run-options">
+<div><label class="label" for="timingPreset">Nhịp bắt đầu mỗi lượt</label><select id="timingPreset"><option value="fast">Nhanh · cách 2 giây</option><option value="fixed30">Cố định · 30 giây</option><option value="random30_180">Ngẫu nhiên · 30 giây–3 phút</option><option value="fixed180">Cố định · 3 phút</option><option value="custom_fixed">Tùy chỉnh · cố định</option><option value="custom_random">Tùy chỉnh · trong khoảng</option></select></div>
+<div><label class="label" for="intervalMin">Từ / cố định (giây)</label><input id="intervalMin" type="number" min="0" max="86400" step="1" value="2"></div>
+<div><label class="label" for="intervalMax">Đến (giây)</label><input id="intervalMax" type="number" min="0" max="86400" step="1" value="2" disabled></div>
+<div><label class="label" for="sampleSeed">Seed tái tạo dữ liệu</label><input id="sampleSeed" type="number" min="0" max="9007199254740991" step="1" placeholder="Để trống: ngẫu nhiên"></div>
+<div><label class="label" for="referenceDate">Ngày tham chiếu</label><input id="referenceDate" type="date" min="1900-01-01" max="2100-12-31"></div></div>
+<p class="run-hint">Lượt đầu bắt đầu ngay. Khoảng gửi tính giữa hai lần bắt đầu; form dài sẽ được điền xong trước khi chạy lượt tiếp theo.</p><p class="run-hint">Giữ cùng seed, cấu hình và ngày tham chiếu để lặp lại bộ dữ liệu thực hành.</p><p id="durationEstimate" class="duration-estimate" aria-live="polite"></p><p id="runOptionsError" class="quantity-error" role="status" hidden></p></details>
 </section>
 <div class="workspace">
 <section class="questions" aria-labelledby="ratioTitle">
 <div class="section-title"><h2 id="ratioTitle">Chia tỷ lệ trả lời</h2><span id="fieldCount" class="count-badge">0 câu hỏi</span><button id="randomAll" type="button" class="ghost-button red-outline" disabled><svg class="icon"><use href="#i-dice"/></svg>Ngẫu nhiên tất cả</button></div>
 <div id="formMeta" class="form-meta" hidden></div>
+<div id="academicTools" class="academic-tools" hidden><div><strong>Mẫu phân phối để thực hành</strong><p>Giữ phần nhân khẩu học, văn bản và câu chọn nhiều.</p></div><select id="ratioPreset" aria-label="Mẫu phân phối"><option value="balanced">Cân bằng</option><option value="bell">Tập trung mức giữa</option><option value="positive">Đồng ý nhẹ</option></select><button id="applyPreset" type="button" class="small-button red-outline">Áp dụng mẫu</button></div>
 <div id="toolbar" class="toolbar" hidden><div class="search-wrap"><svg class="icon"><use href="#i-search"/></svg><input id="searchQuestions" type="search" placeholder="Tìm câu hỏi..." aria-label="Tìm câu hỏi"></div><select id="pageFilter" class="page-select" aria-label="Lọc trang"><option value="">Mọi trang</option></select><button id="undoRates" class="small-button" type="button" disabled aria-label="Hoàn tác thay đổi tỷ lệ">Hoàn tác</button><button id="balanceAll" class="small-button" type="button"><svg class="icon"><use href="#i-sliders"/></svg>Cân bằng</button></div>
 <div id="questionList"><div class="panel empty">
 <svg class="empty-art" viewBox="0 0 170 115" fill="none" aria-hidden="true"><circle cx="87" cy="58" r="47" fill="#fff2ef"/><rect x="50" y="9" width="78" height="95" rx="10" fill="white" stroke="#e8c9cb" transform="rotate(7 50 9)"/><rect x="37" y="12" width="78" height="94" rx="10" fill="white" stroke="#d8a7ad" transform="rotate(-5 37 12)"/><rect x="49" y="28" width="36" height="5" rx="2.5" fill="#c7424e"/><rect x="49" y="41" width="51" height="3" rx="1.5" fill="#ead9d9"/><rect x="49" y="53" width="41" height="3" rx="1.5" fill="#ead9d9"/><circle cx="52" cy="70" r="4" stroke="#d6979e"/><path d="m50 70 1.5 1.5 3-3" stroke="#c52c38" stroke-width="1.5"/><rect x="63" y="68" width="33" height="4" rx="2" fill="#efc9cc"/><circle cx="52" cy="86" r="4" stroke="#e4c7cb"/><rect x="63" y="84" width="25" height="4" rx="2" fill="#efe2e3"/><rect x="107" y="66" width="37" height="32" rx="9" fill="#c52c38"/><path d="M116 82h19m-6-6 6 6-6 6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="m143 24 2 5 5 2-5 2-2 5-2-5-5-2 5-2z" fill="#e8aaac"/><circle cx="25" cy="73" r="3" fill="#eacbcd"/></svg>
@@ -1557,12 +1610,13 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <div class="summary-controls"><label class="toggle-line" for="autoRun">Tự chạy sau khi đọc form<span class="switch"><input type="checkbox" id="autoRun" checked><span></span></span></label><label class="toggle-line" for="showBrowser">Hiện cửa sổ trình duyệt<span class="switch"><input type="checkbox" id="showBrowser"><span></span></span></label></div>
 <div id="countdown" class="countdown" hidden></div>
 <button class="primary" id="startButton" disabled><svg class="icon"><use href="#i-play"/></svg><span>Dán link để bắt đầu</span></button>
-<button id="testButton" class="test-run" disabled><svg class="icon"><use href="#i-shield"/></svg>Điền thử 1 lượt, chưa gửi</button>
+<button id="pauseButton" type="button" class="pause-run" hidden>Tạm dừng</button><button id="testButton" class="test-run" disabled><svg class="icon"><use href="#i-shield"/></svg>Điền thử 1 lượt, chưa gửi</button>
 <div class="test-note">Dữ liệu mô phỏng · Không có bước tạo tài khoản</div>
 </div>
-<div id="jobPanel" class="job-panel" hidden><div class="job-head"><span>Tiến trình thực hiện</span><span id="jobStatus" class="status-chip">ĐANG CHẠY</span></div><div class="job-numbers"><strong id="jobDone">0</strong><span id="jobTotal">/ 100 lượt</span></div><div id="jobBar" class="job-bar"><i></i></div><div id="jobDetail" class="job-detail" role="status" aria-live="polite"></div><div id="jobEvents" class="events"></div><a id="downloadLog" class="download" hidden><svg class="icon"><use href="#i-download"/></svg>Tải nhật ký kết quả</a><a id="downloadSpss" class="download spss-download" hidden><svg class="icon"><use href="#i-download"/></svg>Tải dữ liệu SPSS (.sav)</a><p id="spssNote" class="spss-note" hidden>Chỉ xuất phản hồi đã được xác nhận. Dữ liệu mô phỏng được ghi nhãn trong file.</p></div>
+<div id="jobPanel" class="job-panel" hidden><div class="job-head"><span>Tiến trình thực hiện</span><span id="jobStatus" class="status-chip">ĐANG CHẠY</span></div><div class="job-numbers"><strong id="jobDone">0</strong><span id="jobTotal">/ 100 lượt</span></div><div id="jobBar" class="job-bar"><i></i></div><div id="jobDetail" class="job-detail" role="status" aria-live="polite"></div><p id="runMeta" class="run-meta"></p><div id="jobEvents" class="events"></div><a id="downloadLog" class="download" hidden><svg class="icon"><use href="#i-download"/></svg>Tải nhật ký kết quả</a><a id="downloadSpss" class="download spss-download" hidden><svg class="icon"><use href="#i-download"/></svg>Tải dữ liệu SPSS (.sav)</a><a id="downloadCsv" class="download spss-download" hidden><svg class="icon"><use href="#i-download"/></svg>CSV + bảng mã + báo cáo (.zip)</a><p id="spssNote" class="spss-note" hidden>Chỉ xuất phản hồi đã được xác nhận. Dữ liệu mô phỏng được ghi nhãn trong file.</p></div>
 </aside>
 </div>
+<details id="statsPanel" class="panel stats-panel" hidden><summary>Thống kê mô tả của đợt chạy</summary><p class="stats-note">Chỉ tính phản hồi đã được xác nhận. Trung bình và SD mẫu mô tả mã thang điểm; không phải kết luận kiểm định hay dữ liệu từ người tham gia thật.</p><button id="loadReport" class="small-button red-outline" type="button">Xem / cập nhật thống kê</button><div id="reportContent" class="report-content" aria-live="polite">Bấm để xem tần suất, số thiếu và thang điểm.</div></details>
 <footer id="contact" class="contact-footer"><div class="footer-copy"><strong>Mua key unlimited · 30.000đ/key</strong><p>Nhắn Facebook hoặc Zalo để nhận key và được hỗ trợ sử dụng.</p></div><div class="footer-links"><a href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span>0343415673</a><a href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span>Liên hệ Facebook</a></div></footer>
 <div class="copyright">KDautoform · SIMPLE INPUT. YOUR OWN DISTRIBUTION.</div>
 </main>
@@ -1576,11 +1630,11 @@ const icon=name=>'<svg class="icon"><use href="#i-'+name+'"/></svg>';
 const escapeHTML=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const colors=["#bc2635","#d34e59","#e78186","#eeb0af","#f1cac5","#e7d9d3","#c98c95","#dcb1b5"];
 const kinds={single:"Chọn một",dropdown:"Danh sách",multiple:"Chọn nhiều",scale:"Chấm điểm",grid:"Bảng đánh giá",grid_multiple:"Bảng chọn nhiều",text:"Trả lời ngắn",paragraph:"Tự luận",date:"Ngày tháng",time:"Thời gian"};
-const state={schema:null,config:{},scanId:null,scanToken:0,scanning:false,job:null,armed:false,autoTimer:null,remaining:0,pollTimer:null,forceCheck:false,access:null,spssAvailable:false,providerMode:"google",undo:[]};
+const state={schema:null,config:{},scanId:null,scanToken:0,scanning:false,job:null,armed:false,autoTimer:null,remaining:0,pollTimer:null,forceCheck:false,access:null,spssAvailable:false,csvAvailable:false,providerMode:"google",polling:false,pollErrors:0,undo:[]};
 const emptyMarkup=$("questionList").innerHTML;
 let urlTimer=null,toastTimer=null;
 function toast(message){$("toast").textContent=message;$("toast").hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$("toast").hidden=true,4200)}
-async function api(path,data){const response=await fetch(path,{method:data?"POST":"GET",headers:data?{"Content-Type":"application/json","X-Local-Token":TOKEN}:{},body:data?JSON.stringify(data):undefined});let result;try{result=await response.json()}catch{throw Error("Máy chủ chưa trả về dữ liệu. Vui lòng thử lại.")}if(result.plan)applyAccess(result);if(!response.ok){if(response.status===402){cancelCountdown();if(result.locked)openKeyModal(result.error)}if(response.status===401&&!path.startsWith("/api/auth/"))status(result.error,"error");throw Error(result.error||"Không thực hiện được thao tác.")}return result}
+async function api(path,data){const response=await fetch(path,{method:data?"POST":"GET",headers:data?{"Content-Type":"application/json","X-Local-Token":TOKEN}:{},body:data?JSON.stringify(data):undefined});let result;try{result=await response.json()}catch{throw Error("Máy chủ chưa trả về dữ liệu. Vui lòng thử lại.")}if(result.plan)applyAccess(result);if(!response.ok){if(response.status===402){cancelCountdown();if(result.locked)openKeyModal(result.error)}if(response.status===401&&!path.startsWith("/api/auth/"))status(result.error,"error");const error=Error(result.error||"Không thực hiện được thao tác.");error.status=response.status;throw error}return result}
 function activeJob(){return state.job&&["queued","running","stopping"].includes(state.job.status)}
 function providerFromLink(value){try{const host=new URL(value).hostname.toLowerCase();if(["docs.google.com","forms.gle","forms.google.com"].includes(host))return "google";if(["forms.office.com","forms.office365.com","forms.cloud.microsoft","forms.microsoft.com"].includes(host))return "microsoft"}catch{}return null}
 function validLink(value){if(state.providerMode==="html")return /^https:\/\//i.test(value);return /^https:\/\/(?:docs\.google\.com\/forms\/|forms\.gle\/|forms\.google\.com\/|forms\.office\.com\/|forms\.office365\.com\/|forms\.cloud\.microsoft\/|forms\.microsoft\.com\/)/i.test(value)}
@@ -1592,13 +1646,20 @@ $("providerHeading").textContent=copy[0];$("providerHelp").textContent=copy[1];$
 document.querySelectorAll("[data-provider]").forEach(node=>{const chosen=node.dataset.provider===provider;node.setAttribute("aria-selected",String(chosen));node.tabIndex=chosen?0:-1});
 $("formUrl").closest(".input-grid").querySelector("label").textContent=copy[2];$("formUrl").placeholder=copy[3];
 if(provider==="html")$("autoRun").checked=false;
-if(reset){clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.schema=null;state.config={};state.scanId=null;state.scanning=false;state.armed=false;state.undo=[];$("formUrl").value="";localStorage.removeItem("formpilot.scan");localStorage.removeItem("formpilot.draft");localStorage.setItem("formpilot.url","");$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link "+(provider==="html"?"form HTML chuẩn":provider==="microsoft"?"Microsoft Forms":"Google Forms")+" để bắt đầu.");renderSummary()}
+if(reset){clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.schema=null;state.config={};state.scanId=null;state.scanning=false;state.armed=false;state.undo=[];$("formUrl").value="";localStorage.removeItem("formpilot.scan");localStorage.removeItem("formpilot.draft");localStorage.setItem("formpilot.url","");$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("academicTools").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link "+(provider==="html"?"form HTML chuẩn":provider==="microsoft"?"Microsoft Forms":"Google Forms")+" để bắt đầu.");renderSummary()}
 }
 function status(text,kind=""){const node=$("scanStatus");node.className="scan-status "+kind;node.innerHTML=(kind==="loading"?'<span class="spinner"></span>':icon(kind==="success"?"check":kind==="error"?"alert":"shield"))+"<span>"+escapeHTML(text)+"</span>"}
 function quantity(){const raw=$("quantity").value.trim();if(raw==="")return null;const value=Number(raw);return Number.isInteger(value)&&value>=0?value:null}
 function fieldValid(field){const entry=state.config[field.id];if(!entry)return false;if(field.options.length){const values=field.options.map(option=>Number(entry.rates[option]));if(values.some(value=>!Number.isFinite(value)||value<0||value>100))return false;const sum=values.reduce((a,b)=>a+b,0);return ["multiple","grid_multiple"].includes(field.kind)?sum>=field.minimum*100-.001&&sum<=field.maximum*100+.001:Math.abs(sum-100)<.001}return entry.mode!=="fixed"||Boolean(entry.value.trim())}
 function allowedCount(){const n=quantity();return n!==null&&Boolean(state.access)&&(state.access.plan==="unlimited"||(n>0&&n<=state.access.remaining))}
-function ready(){return Boolean(state.access)&&!state.access.locked&&Boolean(state.schema)&&!state.scanning&&allowedCount()&&state.schema.fields.every(fieldValid)}
+function runSchedule(){const mode=["random30_180","custom_random"].includes($("timingPreset").value)?"random":"fixed",minRaw=$("intervalMin").value.trim(),maxRaw=$("intervalMax").value.trim(),minimum=Number(minRaw),maximum=mode==="fixed"?minimum:Number(maxRaw);if(!minRaw||(mode==="random"&&!maxRaw)||![minimum,maximum].every(n=>Number.isFinite(n)&&n>=0&&n<=86400)||maximum<minimum)return null;return {mode,min_seconds:minimum,max_seconds:maximum}}
+function runSeed(){const raw=$("sampleSeed").value.trim();if(!raw)return null;const value=Number(raw);return Number.isSafeInteger(value)&&value>=0?value:undefined}
+function runReferenceDate(){const el=$("referenceDate");return el.value&&el.validity.valid?el.value:null}
+function formatDuration(value){if(!Number.isFinite(value))return "—";let seconds=Math.max(0,Math.ceil(value)),hours=Math.floor(seconds/3600);seconds%=3600;const minutes=Math.floor(seconds/60);seconds%=60;return (hours?hours+" giờ ":"")+(minutes?minutes+" phút ":"")+(seconds||(!hours&&!minutes)?seconds+" giây":"")}
+function updateRunOptions(){const schedule=runSchedule(),seed=runSeed(),active=Boolean(activeJob());for(const id of ["timingPreset","intervalMin","sampleSeed","referenceDate"])$(id).disabled=active;$("intervalMax").disabled=active||!["random30_180","custom_random"].includes($("timingPreset").value);const error=!schedule?"Chọn khoảng thời gian hợp lệ từ 0 đến 86.400 giây; giá trị Đến không được nhỏ hơn Từ.":seed===undefined?"Seed cần là số nguyên không âm, tối đa 9007199254740991.":!runReferenceDate()?"Chọn ngày tham chiếu hợp lệ để tái tạo dữ liệu.":"";$("runOptionsError").hidden=!error;$("runOptionsError").textContent=error;const n=quantity();$("durationEstimate").textContent=!schedule||n===null?"":n===0?"Chạy liên tục đến khi bạn dừng.":n===1?"Một lượt bắt đầu ngay, không cần chờ khoảng gửi.":"Nhịp gửi dự kiến: "+formatDuration((n-1)*schedule.min_seconds)+(schedule.max_seconds!==schedule.min_seconds?" – "+formatDuration((n-1)*schedule.max_seconds):"")+". Form dài có thể cần thêm thời gian."}
+function persistRunOptions(){localStorage.setItem("formpilot.runOptions",JSON.stringify({preset:$("timingPreset").value,min:$("intervalMin").value,max:$("intervalMax").value,seed:$("sampleSeed").value,referenceDate:$("referenceDate").value}))}
+function restoreRunOptions(){const today=new Date();$("referenceDate").value=today.getFullYear()+"-"+String(today.getMonth()+1).padStart(2,"0")+"-"+String(today.getDate()).padStart(2,"0");try{const saved=JSON.parse(localStorage.getItem("formpilot.runOptions")||"null");if(saved){if([...$("timingPreset").options].some(o=>o.value===saved.preset))$("timingPreset").value=saved.preset;for(const [id,key] of [["intervalMin","min"],["intervalMax","max"],["sampleSeed","seed"],["referenceDate","referenceDate"]])if(saved[key]!==undefined)$(id).value=saved[key]}}catch{}updateRunOptions()}
+function ready(){return Boolean(state.access)&&!state.access.locked&&Boolean(state.schema)&&!state.scanning&&allowedCount()&&Boolean(runSchedule())&&runSeed()!==undefined&&Boolean(runReferenceDate())&&state.schema.fields.every(fieldValid)}
 function apportion(weights,total=100){const sum=weights.reduce((a,b)=>a+b,0);if(!sum)return weights.map((_,i)=>i===0?total:0);const ideal=weights.map(v=>v/sum*total),values=ideal.map(Math.floor);const order=values.map((_,i)=>i).sort((a,b)=>(ideal[b]-values[b])-(ideal[a]-values[a]));const left=total-values.reduce((a,b)=>a+b,0);for(let i=0;i<left;i++)values[order[i]]++;return values}
 function fold(value){return String(value).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/đ/g,"d")}
 function randomRates(field){let weights=field.options.map(()=>.8+Math.random()*.5);const labels=field.options.map(fold);const scores=labels.map(label=>label.includes("khong dong y")?label.includes("hoan toan")?1:2:label.includes("dong y")?label.includes("hoan toan")?5:4:label.includes("binh thuong")||label.includes("trung lap")?3:0);if(scores.length===5&&scores.slice().sort().join()==="1,2,3,4,5")weights=scores.map(score=>[12,17,25,28,18][score-1]+Math.random()*6-3);else if(field.kind==="scale"&&field.options.length>=3)weights=field.options.map((_,i)=>Math.exp(-.5*Math.pow((i/(field.options.length-1)-.62)/.30,2))*(.9+Math.random()*.2));else if(labels.some(v=>/^(co|yes)\b/.test(v))&&labels.some(v=>/^(khong|no)\b/.test(v)))weights=labels.map(v=>/^(co|yes)\b/.test(v)?1.5+Math.random()*.2:1);if(["multiple","grid_multiple"].includes(field.kind)){const low=field.minimum*100,high=field.maximum*100;const total=Math.min(high,Math.max(low,140+Math.floor(Math.random()*100)));const values=weights.map(()=>0);for(let n=0;n<total;n++){const available=weights.map((_,i)=>i).filter(i=>values[i]<100);const sum=available.reduce((a,i)=>a+weights[i],0);let point=Math.random()*sum,chosen=available[available.length-1];for(const i of available){point-=weights[i];if(point<=0){chosen=i;break}}values[chosen]++}return values}return apportion(weights)}
@@ -1607,9 +1668,9 @@ function fieldNumber(field){const ids=[...new Set(state.schema.fields.map(f=>f.i
 function buildCard(field){const config=state.config[field.id],multi=["multiple","grid_multiple"].includes(field.kind);let body="";if(field.options.length){body='<div class="answers">'+field.options.map((option,i)=>'<div class="answer-row"><div class="answer-label"><i class="option-dot" style="background:'+colors[i%colors.length]+'"></i><span>'+escapeHTML(option)+'</span></div><input type="range" min="0" max="100" step="1" class="rate-range" data-field="'+field.id+'" data-option="'+i+'" value="'+config.rates[option]+'" aria-label="Tỷ lệ '+escapeHTML(option)+'"><label class="rate-box"><input type="number" min="0" max="100" step="1" class="rate-number" data-field="'+field.id+'" data-option="'+i+'" value="'+config.rates[option]+'" aria-label="Tỷ lệ mong muốn '+escapeHTML(option)+'"><span>%</span></label></div>').join("")+'</div><div class="rate-stack">'+field.options.map((_,i)=>'<i data-segment="'+i+'" style="background:'+colors[i%colors.length]+'"></i>').join("")+'</div><div class="q-bottom"><span>'+(multi?"Chọn "+field.minimum+"–"+field.maximum+" đáp án mỗi lượt":"Tỷ lệ mong muốn cho mỗi đáp án")+'</span><span class="sum"></span><button class="small-button normalize-one" data-field="'+field.id+'" type="button">Chuẩn hóa</button></div>'}else{const temporal=["date","time"].includes(field.kind);body='<div class="text-mode">'+icon("spark")+'<span>'+(temporal?"Tự tạo ngày / giờ phù hợp":"Trả lời theo hồ sơ và nội dung câu hỏi")+'</span>'+(!temporal?'<select class="text-mode-select" data-field="'+field.id+'" aria-label="Chế độ câu trả lời"><option value="auto" '+(config.mode==="auto"?"selected":"")+'>Tự động</option><option value="fixed" '+(config.mode==="fixed"?"selected":"")+'>Nội dung tự nhập</option></select>':"")+'</div>'+(!temporal?'<textarea class="fixed-text" data-field="'+field.id+'" aria-label="Nội dung tự nhập" placeholder="Nhập câu trả lời bạn muốn sử dụng..." '+(config.mode==="fixed"?"":"hidden")+'>'+escapeHTML(config.value||"")+'</textarea>':"")}
 return '<article class="panel question-card" id="'+cardId(field)+'" data-field="'+field.id+'" data-page="'+field.page+'"><div class="q-top"><span class="q-label">Câu '+fieldNumber(field)+'</span><span class="q-kind">'+kinds[field.kind]+'</span>'+(field.required?'<span class="required">• Bắt buộc</span>':"")+(field.options.length?'<button class="small-button random-one" data-field="'+field.id+'" type="button">'+icon("dice")+'Ngẫu nhiên</button>':"")+'</div><h3>'+escapeHTML(field.question)+'</h3>'+(field.row?'<p class="row-name">'+escapeHTML(field.row)+'</p>':"")+body+'</article>'}
 function updateCard(field){const card=$(cardId(field));if(!card)return;const valid=fieldValid(field);card.classList.toggle("invalid",!valid);if(!field.options.length)return;const rates=field.options.map(option=>Number(state.config[field.id].rates[option]));const total=rates.reduce((a,b)=>a+b,0);field.options.forEach((option,i)=>{const segment=card.querySelector('[data-segment="'+i+'"]');segment.style.width=(total?Math.max(0,rates[i])/total*100:0)+"%"});const sum=card.querySelector(".sum");sum.innerHTML=(valid?icon("check"):icon("alert"))+(Number.isFinite(total)?Number(total.toFixed(2)):"—")+"%";const multi=["multiple","grid_multiple"].includes(field.kind);card.querySelector(".normalize-one").hidden=multi;sum.title=multi?"Tổng tỷ lệ có thể vượt 100% do được chọn nhiều đáp án":"Tổng tỷ lệ phải bằng 100%"}
-function renderQuestions(){if(!state.schema){$("questionList").innerHTML=emptyMarkup;return}$("questionList").innerHTML=state.schema.fields.map(buildCard).join("");state.schema.fields.forEach(updateCard);$("fieldCount").textContent=state.schema.question_count+" câu hỏi";$("formMeta").hidden=false;$("formMeta").innerHTML="<strong>"+escapeHTML(state.schema.title)+"</strong><small>"+(state.schema.provider==="microsoft"?"Microsoft Forms":state.schema.provider==="html"?"Form HTML":"Google Forms")+" · "+state.schema.pages.length+" trang · "+state.schema.fields.length+" mục trả lời · "+(state.schema.branching?"Có phân nhánh":"Tự điền đủ toàn bộ trang")+"</small>";$("toolbar").hidden=false;$("pageFilter").innerHTML='<option value="">Mọi trang</option>'+state.schema.pages.map(page=>'<option value="'+page.index+'">Trang '+(page.index+1)+'</option>').join("");filterQuestions();renderSummary()}
+function renderQuestions(){if(!state.schema){$("questionList").innerHTML=emptyMarkup;return}$("questionList").innerHTML=state.schema.fields.map(buildCard).join("");state.schema.fields.forEach(updateCard);$("fieldCount").textContent=state.schema.question_count+" câu hỏi";$("formMeta").hidden=false;$("formMeta").innerHTML="<strong>"+escapeHTML(state.schema.title)+"</strong><small>"+(state.schema.provider==="microsoft"?"Microsoft Forms":state.schema.provider==="html"?"Form HTML":"Google Forms")+" · "+state.schema.pages.length+" trang · "+state.schema.fields.length+" mục trả lời · "+(state.schema.branching?"Có phân nhánh":"Tự điền đủ toàn bộ trang")+"</small>";$("toolbar").hidden=false;$("academicTools").hidden=false;$("pageFilter").innerHTML='<option value="">Mọi trang</option>'+state.schema.pages.map(page=>'<option value="'+page.index+'">Trang '+(page.index+1)+'</option>').join("");filterQuestions();renderSummary()}
 function filterQuestions(){if(!state.schema)return;const term=fold($("searchQuestions").value),page=$("pageFilter").value;let count=0;for(const field of state.schema.fields){const visible=(!term||fold(field.question+" "+(field.row||"")).includes(term))&&(page===""||String(field.page)===page);const card=$(cardId(field));if(card){card.hidden=!visible;if(visible)count++}}let empty=$("noResults");if(!count&&!empty){empty=document.createElement("div");empty.id="noResults";empty.className="no-results";empty.textContent="Không có câu hỏi phù hợp."; $("questionList").append(empty)}else if(count&&empty)empty.remove()}
-function renderSummary(){const count=quantity(),isActive=activeJob(),locked=Boolean(state.access?.locked),unlimited=state.access?.plan==="unlimited";$("summaryCount").innerHTML=(count===0?"∞":count===null?"—":count.toLocaleString("vi-VN"))+"<small>lượt điền</small>";$("summaryQuestions").textContent=state.schema?state.schema.question_count+" câu · "+state.schema.pages.length+" trang":"Chưa kết nối";const valid=state.schema?state.schema.fields.filter(fieldValid).length:0,total=state.schema?.fields.length||0;$("summaryValid").textContent=total?valid+"/"+total+" mục":"—";$("summaryValid").className=total?(valid===total?"good":"bad"):"";$("summaryMode").textContent=state.schema?(count>0&&!state.schema.branching&&!state.schema.fields.some(f=>f.exclusive_columns)?"Theo số lượt":"Theo xác suất"):"Theo mong muốn";const button=$("startButton");button.classList.toggle("stop",Boolean(isActive));button.disabled=isActive?state.job.status==="stopping":locked?false:!ready();button.innerHTML=icon(isActive?"stop":locked?"shield":"play")+"<span>"+(isActive?(state.job.status==="stopping"?"Đang dừng...":"Dừng lượt chạy"):locked?"Nhập key để tiếp tục":state.remaining>0?"Bắt đầu ngay":state.schema?"Bắt đầu điền form":"Dán link để bắt đầu")+"</span>";$("testButton").disabled=!ready()||isActive;$("randomAll").disabled=!state.schema||isActive;$("balanceAll").disabled=!state.schema||isActive;$("undoRates").disabled=!state.undo.length||isActive;$("formUrl").disabled=Boolean(isActive)||locked;$("quantity").disabled=Boolean(isActive)||locked;$("minusCount").disabled=Boolean(isActive)||locked;$("plusCount").disabled=Boolean(isActive)||locked||(!unlimited&&count>=state.access?.remaining);$("scanAgain").disabled=Boolean(isActive)||state.scanning||locked;document.querySelectorAll(".provider-tabs button").forEach(el=>el.disabled=Boolean(isActive));document.querySelectorAll(".question-card input,.question-card select,.question-card textarea,.question-card button").forEach(el=>el.disabled=Boolean(isActive)||locked);const badCount=Boolean(state.access)&&!isActive&&!locked&&!allowedCount();$("quantityError").hidden=!badCount;$("quantityError").textContent=badCount?(unlimited?"Nhập số nguyên từ 0 trở lên.":"Bạn còn "+state.access.remaining+" lượt miễn phí. Chọn từ 1 đến "+state.access.remaining+" hoặc mở khóa unlimited."):""}
+function renderSummary(){const count=quantity(),isActive=activeJob(),locked=Boolean(state.access?.locked),unlimited=state.access?.plan==="unlimited";$("summaryCount").innerHTML=(count===0?"∞":count===null?"—":count.toLocaleString("vi-VN"))+"<small>lượt điền</small>";$("summaryQuestions").textContent=state.schema?state.schema.question_count+" câu · "+state.schema.pages.length+" trang":"Chưa kết nối";const valid=state.schema?state.schema.fields.filter(fieldValid).length:0,total=state.schema?.fields.length||0;$("summaryValid").textContent=total?valid+"/"+total+" mục":"—";$("summaryValid").className=total?(valid===total?"good":"bad"):"";$("summaryMode").textContent=state.schema?(count>0&&!state.schema.branching&&!state.schema.fields.some(f=>f.exclusive_columns)?"Theo số lượt":"Theo xác suất"):"Theo mong muốn";const button=$("startButton");button.classList.toggle("stop",Boolean(isActive));button.disabled=isActive?state.job.status==="stopping":locked?false:!ready();button.innerHTML=icon(isActive?"stop":locked?"shield":"play")+"<span>"+(isActive?(state.job.status==="stopping"?"Đang dừng...":"Dừng lượt chạy"):locked?"Nhập key để tiếp tục":state.remaining>0?"Bắt đầu ngay":state.schema?"Bắt đầu điền form":"Dán link để bắt đầu")+"</span>";$("testButton").disabled=!ready()||isActive;$("randomAll").disabled=!state.schema||isActive;$("balanceAll").disabled=!state.schema||isActive;$("undoRates").disabled=!state.undo.length||isActive;$("formUrl").disabled=Boolean(isActive)||locked;$("quantity").disabled=Boolean(isActive)||locked;$("minusCount").disabled=Boolean(isActive)||locked;$("plusCount").disabled=Boolean(isActive)||locked||(!unlimited&&count>=state.access?.remaining);$("scanAgain").disabled=Boolean(isActive)||state.scanning||locked;document.querySelectorAll(".provider-tabs button").forEach(el=>el.disabled=Boolean(isActive));document.querySelectorAll(".question-card input,.question-card select,.question-card textarea,.question-card button").forEach(el=>el.disabled=Boolean(isActive)||locked);for(const id of ["ratioPreset","applyPreset"])$(id).disabled=Boolean(isActive)||!state.schema||locked;updateRunOptions();const badCount=Boolean(state.access)&&!isActive&&!locked&&!allowedCount();$("quantityError").hidden=!badCount;$("quantityError").textContent=badCount?(unlimited?"Nhập số nguyên từ 0 trở lên.":"Bạn còn "+state.access.remaining+" lượt miễn phí. Chọn từ 1 đến "+state.access.remaining+" hoặc mở khóa unlimited."):""}
 function cancelCountdown(){clearInterval(state.autoTimer);state.autoTimer=null;state.remaining=0;$("countdown").hidden=true;renderSummary()}
 function scheduleAuto(){persistDraft();cancelCountdown();if(!state.access||state.access.locked||!state.armed||!$("autoRun").checked||!ready()||activeJob())return;state.remaining=12;$("countdown").hidden=false;function paint(){$("countdown").innerHTML="Tự bắt đầu sau <strong>"+state.remaining+" giây</strong>. Chỉnh tỷ lệ để đặt lại thời gian. <button type='button' id='pauseAuto'>Tạm dừng</button>";renderSummary()}paint();state.autoTimer=setInterval(()=>{state.remaining--;if(state.remaining<=0){cancelCountdown();startJob(false).catch(error=>toast(error.message))}else paint()},1000)}
 function rememberRates(){state.undo.push(JSON.stringify(state.config));if(state.undo.length>25)state.undo.shift();$("undoRates").disabled=false}
@@ -1618,12 +1679,13 @@ function undoRates(){if(!state.undo.length||activeJob())return;state.config=JSON
 function updateRate(fieldId,optionIndex,value){rememberRates();const field=state.schema.fields.find(f=>f.id===fieldId);if(!field)return;const rate=Number(value);state.config[fieldId].rates[field.options[optionIndex]]=rate;const card=$(cardId(field));card.querySelectorAll('[data-option="'+optionIndex+'"]').forEach(input=>{if(input!==document.activeElement)input.value=value});updateCard(field);renderSummary();persistDraft();scheduleAuto()}
 function refreshCard(field){const old=$(cardId(field));if(old){old.outerHTML=buildCard(field);updateCard(field)}}
 function normalizeField(field,balanced=false){if(!field.options.length)return;if(["multiple","grid_multiple"].includes(field.kind)){if(balanced){const target=Math.min(field.maximum*100,Math.max(field.minimum*100,180));let values=apportion(field.options.map(()=>1),target);state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}return}const values=apportion(field.options.map(option=>balanced?1:Math.max(0,Number(state.config[field.id].rates[option])||0)));state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}
-async function scanForm(){const url=$("formUrl").value.trim();const detected=providerFromLink(url);if(detected&&detected!==state.providerMode)selectProvider(detected);cancelCountdown();if(activeJob())return;if(state.access?.locked){openKeyModal("Bạn đã dùng hết 10 lượt miễn phí.");return}if(!validLink(url)){status(url?"Vui lòng nhập link hợp lệ cho loại biểu mẫu đã chọn.":"Google Forms và Microsoft Forms công khai",url?"error":"");return}const token=++state.scanToken;state.scanning=true;state.armed=true;state.schema=null;state.config={};$("formMeta").hidden=true;$("toolbar").hidden=true;$("fieldCount").textContent="Đang đọc...";$("questionList").innerHTML='<div class="loading-skeleton" aria-label="Đang đọc câu hỏi"></div>';status("Đang đọc câu hỏi và tất cả các trang...","loading");renderSummary();try{const result=await api("/api/scan",{url,provider:state.providerMode});if(token!==state.scanToken)return;state.scanId=result.scan_id;const poll=async()=>{if(token!==state.scanToken)return;try{const value=await api("/api/scans/"+state.scanId);if(token!==state.scanToken)return;if(value.status==="scanning"){setTimeout(poll,650);return}if(value.status==="error")throw Error(value.error);state.schema=value.schema;state.config=value.config;state.undo=[];$("undoRates").disabled=true;state.scanning=false;localStorage.setItem("formpilot.scan",state.scanId);localStorage.setItem("formpilot.url",url);renderQuestions();status("Đã đọc "+value.schema.question_count+" câu hỏi qua "+value.schema.pages.length+" trang.","success");scheduleAuto()}catch(error){if(token===state.scanToken)scanError(error)}};poll()}catch(error){if(token===state.scanToken)scanError(error)}}
+async function scanForm(){const url=$("formUrl").value.trim();const detected=providerFromLink(url);if(detected&&detected!==state.providerMode)selectProvider(detected);cancelCountdown();if(activeJob())return;if(state.access?.locked){openKeyModal("Bạn đã dùng hết 10 lượt miễn phí.");return}if(!validLink(url)){status(url?"Vui lòng nhập link hợp lệ cho loại biểu mẫu đã chọn.":"Google Forms và Microsoft Forms công khai",url?"error":"");return}const token=++state.scanToken;state.scanning=true;state.armed=true;state.schema=null;state.config={};$("formMeta").hidden=true;$("toolbar").hidden=true;$("academicTools").hidden=true;$("fieldCount").textContent="Đang đọc...";$("questionList").innerHTML='<div class="loading-skeleton" aria-label="Đang đọc câu hỏi"></div>';status("Đang đọc câu hỏi và tất cả các trang...","loading");renderSummary();try{const result=await api("/api/scan",{url,provider:state.providerMode});if(token!==state.scanToken)return;state.scanId=result.scan_id;const poll=async()=>{if(token!==state.scanToken)return;try{const value=await api("/api/scans/"+state.scanId);if(token!==state.scanToken)return;if(value.status==="scanning"){setTimeout(poll,650);return}if(value.status==="error")throw Error(value.error);state.schema=value.schema;state.config=value.config;state.undo=[];$("undoRates").disabled=true;state.scanning=false;localStorage.setItem("formpilot.scan",state.scanId);localStorage.setItem("formpilot.url",url);renderQuestions();status("Đã đọc "+value.schema.question_count+" câu hỏi qua "+value.schema.pages.length+" trang.","success");scheduleAuto()}catch(error){if(token===state.scanToken)scanError(error)}};poll()}catch(error){if(token===state.scanToken)scanError(error)}}
 function scanError(error){state.scanning=false;state.schema=null;state.config={};state.armed=false;status(error.message,"error");$("fieldCount").textContent="0 câu hỏi";$("questionList").innerHTML=emptyMarkup;renderSummary();toast(error.message)}
-async function startJob(checkOnly){cancelCountdown();if(state.access?.locked){openKeyModal();return}if(!ready()||activeJob())return;state.armed=false;const count=quantity();try{const result=await api("/api/jobs",{scan_id:state.scanId,count,config:state.config,delay:2,headless:!$("showBrowser").checked,mode:checkOnly?"check":"send"});localStorage.setItem("formpilot.job",result.job_id);state.job={id:result.job_id,mode:result.mode,status:"queued",processed:0,total:result.mode==="check"?1:count,events:[]};renderJob();pollJob()}catch(error){toast(error.message);renderSummary()}}
-async function pollJob(){if(!state.job)return;try{state.job=await api("/api/jobs/"+state.job.id);await api("/api/auth/status");renderJob();if(activeJob())state.pollTimer=setTimeout(pollJob,1000)}catch(error){toast(error.message);clearTimeout(state.pollTimer)}}
-function renderJob(){const job=state.job;if(!job)return;$("jobPanel").hidden=false;const labels={queued:"ĐANG CHUẨN BỊ",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+job.status;$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Biểu mẫu đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";const sav=state.spssAvailable&&job.confirmed>0;$("downloadSpss").hidden=!sav;$("spssNote").hidden=!sav;$("downloadSpss").href="/api/jobs/"+job.id+"/export.sav";renderSummary()}
-$("formUrl").addEventListener("input",()=>{clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.armed=false;if(validLink($("formUrl").value.trim()))urlTimer=setTimeout(scanForm,850);else{state.schema=null;state.config={};state.scanning=false;$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link Google Forms hoặc Microsoft Forms để bắt đầu.");renderSummary()}});
+async function startJob(checkOnly){cancelCountdown();if(state.access?.locked){openKeyModal();return}if(!ready()||activeJob())return;state.armed=false;const count=quantity(),schedule=runSchedule(),seed=runSeed();try{const result=await api("/api/jobs",{scan_id:state.scanId,count,config:state.config,schedule,seed,reference_date:runReferenceDate(),headless:!$("showBrowser").checked,mode:checkOnly?"check":"send"});localStorage.setItem("formpilot.job",result.job_id);state.pollErrors=0;state.job={id:result.job_id,mode:result.mode,status:"queued",processed:0,total:result.mode==="check"?1:count,events:[],schedule,seed};$("statsPanel").hidden=true;$("reportContent").textContent="Bấm để xem thống kê của đợt này.";renderJob();pollJob()}catch(error){toast(error.message);renderSummary()}}
+function queuePoll(delay){clearTimeout(state.pollTimer);state.pollTimer=setTimeout(pollJob,delay)}
+async function pollJob(){if(!state.job)return;if(state.polling){queuePoll(500);return;}clearTimeout(state.pollTimer);state.polling=true;const id=state.job.id;try{const value=await api("/api/jobs/"+id);if(state.job?.id!==id)return;state.job=value;state.pollErrors=0;renderJob();if(activeJob())queuePoll(document.hidden?15000:state.job.waiting||state.job.paused?5000:2000)}catch(error){state.pollErrors++;if(error.status===401||error.status===404||error.message.includes("Không tìm thấy lượt chạy")){state.job.status="error";state.job.error="Phiên chạy không còn trên máy chủ. Kiểm tra kết quả đã lưu trước khi chạy lại.";renderJob()}else{if(state.pollErrors===1)toast("Mất kết nối tiến độ. Công cụ sẽ tự nối lại, không gửi lại yêu cầu chạy.");$("runMeta").textContent="Đang kết nối lại với máy chủ...";queuePoll(Math.min(30000,2000*2**Math.min(4,state.pollErrors)))}}finally{state.polling=false}}
+function renderJob(){const job=state.job;if(!job)return;$("jobPanel").hidden=false;const labels={queued:"ĐANG CHUẨN BỊ",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+(activeJob()&&job.paused?"paused":activeJob()&&job.waiting?"waiting":job.status);if(activeJob()&&job.paused)$("jobStatus").textContent="TẠM DỪNG";else if(activeJob()&&job.waiting)$("jobStatus").textContent="ĐANG CHỜ";$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Biểu mẫu đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";const sav=state.spssAvailable&&job.confirmed>0;$("downloadSpss").hidden=!sav;$("spssNote").hidden=!sav;$("downloadSpss").href="/api/jobs/"+job.id+"/export.sav";$("downloadCsv").hidden=!state.csvAvailable||!job.confirmed;$("downloadCsv").href="/api/jobs/"+job.id+"/export.zip";$("statsPanel").hidden=!job.confirmed;$("pauseButton").hidden=!activeJob();$("pauseButton").disabled=job.status==="stopping";$("pauseButton").textContent=job.pause_requested?"Tiếp tục":"Tạm dừng";$("runMeta").textContent=(job.seed!==null&&job.seed!==undefined?"Seed: "+job.seed+" · ":"")+(job.elapsed_seconds!==undefined?"Đã chạy "+formatDuration(job.elapsed_seconds):"")+(job.average_response_seconds?" · TB "+formatDuration(job.average_response_seconds)+"/lượt":"");paintRunTiming();renderSummary()}
+$("formUrl").addEventListener("input",()=>{clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.armed=false;if(validLink($("formUrl").value.trim()))urlTimer=setTimeout(scanForm,850);else{state.schema=null;state.config={};state.scanning=false;$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("academicTools").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link Google Forms hoặc Microsoft Forms để bắt đầu.");renderSummary()}});
 $("scanAgain").addEventListener("click",scanForm);
 document.querySelectorAll(".provider-tabs button").forEach(button=>button.addEventListener("click",()=>selectProvider(button.dataset.provider,true)));
 document.querySelector(".provider-tabs").addEventListener("keydown",event=>{if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key)||activeJob())return;const buttons=[...document.querySelectorAll(".provider-tabs button")];let i=buttons.indexOf(document.activeElement);if(i<0)return;event.preventDefault();i=event.key==="Home"?0:event.key==="End"?buttons.length-1:(i+(event.key==="ArrowRight"?1:-1)+buttons.length)%buttons.length;buttons[i].click();buttons[i].focus()});
@@ -1641,12 +1703,20 @@ $("countdown").addEventListener("click",event=>{if(event.target.closest("#pauseA
 $("undoRates").addEventListener("click",undoRates);document.addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"&&!event.target.matches("input,textarea,select")){event.preventDefault();undoRates()}});
 $("searchQuestions").addEventListener("input",filterQuestions);$("pageFilter").addEventListener("change",filterQuestions);
 $("testButton").addEventListener("click",()=>startJob(true));
-$("downloadSpss").addEventListener("click",async event=>{event.preventDefault();const link=$("downloadSpss");if(link.getAttribute("aria-busy")==="true")return;link.setAttribute("aria-busy","true");try{const response=await fetch(link.href);if(!response.ok){let info={};try{info=await response.json()}catch{}throw Error(info.error||"Chưa xuất được dữ liệu SPSS.")}const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="KDautoform_"+state.job.id+".sav";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast("Đã tải file .sav. Mở trong SPSS bằng File → Open → Data.")}catch(error){toast(error.message)}finally{link.removeAttribute("aria-busy")}});
+function paintRunTiming(){const job=state.job;if(!job||!activeJob()||job.status==="stopping")return;if(job.paused)$("jobDetail").textContent="Đã tạm dừng. Nhấn Tiếp tục để tiếp tục từ vị trí này.";else if(job.pause_requested)$("jobDetail").textContent="Sẽ tạm dừng ở bước kiểm tra tiếp theo; yêu cầu gửi đang diễn ra có thể hoàn tất.";else if(job.waiting){const seconds=job.next_run_at?Math.max(0,job.next_run_at-Date.now()/1000):job.remaining_seconds;$("jobDetail").textContent="Lượt tiếp theo sau "+formatDuration(seconds)+". Bạn có thể tạm dừng hoặc dừng đợt chạy."}}
+$("pauseButton").addEventListener("click",async()=>{if(!activeJob())return;const action=state.job.pause_requested?"resume":"pause";$("pauseButton").disabled=true;try{state.job=await api("/api/jobs/"+state.job.id+"/"+action,{});renderJob()}catch(error){toast(error.message);$("pauseButton").disabled=false}});
+$("timingPreset").addEventListener("change",()=>{const value=$("timingPreset").value,map={fast:[2,2],fixed30:[30,30],random30_180:[30,180],fixed180:[180,180]};if(map[value]){$("intervalMin").value=map[value][0];$("intervalMax").value=map[value][1]}persistRunOptions();renderSummary();scheduleAuto()});
+for(const id of ["intervalMin","intervalMax","sampleSeed","referenceDate"])$(id).addEventListener("input",()=>{if(!["sampleSeed","referenceDate"].includes(id))$("timingPreset").value=["random30_180","custom_random"].includes($("timingPreset").value)?"custom_random":"custom_fixed";persistRunOptions();renderSummary();scheduleAuto()});
+$("applyPreset").addEventListener("click",async()=>{if(!state.scanId||activeJob())return;cancelCountdown();const scanId=state.scanId,token=state.scanToken,draft=JSON.stringify(state.config);$("applyPreset").disabled=true;try{const value=await api("/api/scans/"+scanId+"/preset",{preset:$("ratioPreset").value,config:JSON.parse(draft)});if(scanId!==state.scanId||token!==state.scanToken)return;if(JSON.stringify(state.config)!==draft){toast("Tỷ lệ đã được sửa trong khi chờ. Hãy áp dụng mẫu lại nếu cần.");return}rememberRates();state.config=value.config;renderQuestions();persistDraft();scheduleAuto();toast("Đã áp dụng mẫu phân phối. Bạn vẫn có thể chỉnh từng câu.")}catch(error){toast(error.message)}finally{renderSummary()}});
+$("loadReport").addEventListener("click",async()=>{if(!state.job?.confirmed)return;const jobId=state.job.id;$("loadReport").disabled=true;try{const report=await api("/api/jobs/"+jobId+"/report");if(state.job?.id!==jobId)return;const f=v=>v===null?"—":Number(v).toLocaleString("vi-VN",{maximumFractionDigits:3});$("reportContent").innerHTML='<p>'+report.confirmed+' phản hồi đã xác nhận · Dữ liệu mô phỏng</p><table class="stats-table"><thead><tr><th>Câu hỏi</th><th>N hợp lệ</th><th>Thiếu</th><th>TB</th><th>SD mẫu</th></tr></thead><tbody>'+report.fields.map(row=>'<tr><td>'+escapeHTML(row.question)+(row.row?' · '+escapeHTML(row.row):'')+'<details><summary>Tần suất đáp án</summary>'+row.frequencies.map(item=>'<p>'+escapeHTML(item.option)+(row.score_map&&row.score_map[item.option]!==undefined?' [mã '+f(row.score_map[item.option])+']':'')+': '+item.count+' ('+f(item.percent)+'%)</p>').join('')+'</details></td><td>'+f(row.valid_n)+'</td><td>'+f(row.missing)+'</td><td>'+f(row.mean)+'</td><td>'+f(row.stddev)+'</td></tr>').join('')+'</tbody></table>'}catch(error){toast(error.message)}finally{$("loadReport").disabled=false}});
+async function downloadResult(event,kind){event.preventDefault();const link=event.currentTarget;if(link.getAttribute("aria-busy")==="true")return;link.setAttribute("aria-busy","true");const jobId=state.job.id,href=link.href;try{const response=await fetch(href);if(!response.ok){let info={};try{info=await response.json()}catch{}throw Error(info.error||"Chưa xuất được dữ liệu.")}const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="KDautoform_"+jobId+"."+kind;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast(kind==="sav"?"Đã tải .sav. Mở trong SPSS bằng File → Open → Data.":"Đã tải CSV, bảng mã và báo cáo trong file ZIP.")}catch(error){toast(error.message)}finally{link.removeAttribute("aria-busy")}}
+$("downloadSpss").addEventListener("click",event=>downloadResult(event,"sav"));$("downloadCsv").addEventListener("click",event=>downloadResult(event,"zip"));
 $("startButton").addEventListener("click",async()=>{if(activeJob()){try{state.job=await api("/api/jobs/"+state.job.id+"/stop",{});renderJob()}catch(error){toast(error.message)}}else if(state.access?.locked){openKeyModal()}else startJob(false)});
-async function init(){const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";selectProvider(providerFromLink($("formUrl").value)||localStorage.getItem("formpilot.provider")||"google");try{const info=await api("/api/state");state.forceCheck=info.force_check;state.spssAvailable=Boolean(info.spss_export);if(info.plan!=="unlimited"&&(quantity()===null||quantity()===0||quantity()>info.remaining))$("quantity").value=Math.max(1,info.remaining);$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ. Vui lòng tải lại trang.","error");$("usageDetail").textContent="Chưa kết nối được máy chủ. Vui lòng thử tải lại trang."}renderSummary()}
+async function init(){restoreRunOptions();const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";selectProvider(providerFromLink($("formUrl").value)||localStorage.getItem("formpilot.provider")||"google");try{const info=await api("/api/state");state.forceCheck=info.force_check;state.spssAvailable=Boolean(info.spss_export);state.csvAvailable=Boolean(info.csv_export);if(info.plan!=="unlimited"&&(quantity()===null||quantity()===0||quantity()>info.remaining))$("quantity").value=Math.max(1,info.remaining);$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ. Vui lòng tải lại trang.","error");$("usageDetail").textContent="Chưa kết nối được máy chủ. Vui lòng thử tải lại trang."}renderSummary()}
 let keyReturnFocus=null;
 function applyAccess(info){
-state.access=info;
+const previous=state.access;state.access={plan:info.plan,remaining:info.remaining,used:info.used,free_limit:info.free_limit,locked:info.locked,key_name:info.key_name};
+if(previous&&["plan","remaining","used","free_limit","locked","key_name"].every(key=>previous[key]===state.access[key]))return;
 const unlimited=info.plan==="unlimited",locked=Boolean(info.locked),strip=document.querySelector(".usage-strip");
 strip.classList.toggle("is-locked",locked);strip.classList.toggle("is-unlimited",unlimited);
 $("planLabel").textContent=unlimited?"Unlimited đã mở khóa":locked?"Bạn đã dùng hết 10 lượt miễn phí":"Bạn còn "+info.remaining+" lượt miễn phí";
@@ -1694,7 +1764,8 @@ $("accessGate").addEventListener("click",event=>{if(event.target===$("accessGate
 $("deactivateKey").addEventListener("click",async()=>{try{await api("/api/auth/logout",{});closeKeyModal();toast("Đã ngừng dùng key trên trình duyệt này. Key vẫn có thể nhập lại.")}catch(error){toast(error.message)}});
 document.addEventListener("keydown",event=>{if($("accessGate").hidden)return;if(event.key==="Escape"){event.preventDefault();closeKeyModal()}if(event.key==="Tab"){const nodes=[...$("accessGate").querySelectorAll("button,a[href],input")].filter(el=>!el.disabled&&el.getClientRects().length);const first=nodes[0],last=nodes[nodes.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}}});
 
-window.addEventListener("beforeunload",()=>{clearInterval(state.autoTimer);clearTimeout(state.pollTimer)});window.addEventListener("pageshow",event=>{if(event.persisted)location.reload()});authInit();
+const runClock=setInterval(paintRunTiming,1000);document.addEventListener("visibilitychange",()=>{if(!document.hidden&&activeJob()){clearTimeout(state.pollTimer);pollJob()}});
+window.addEventListener("beforeunload",()=>{clearInterval(state.autoTimer);clearTimeout(state.pollTimer);clearInterval(runClock)});window.addEventListener("pageshow",event=>{if(event.persisted)location.reload()});authInit();
 </script>
 </body></html>"""
 
@@ -1770,9 +1841,9 @@ def validate_web_config(schema, supplied):
 
 
 class WebRatioSampler:
-    def __init__(self, schema, config, total, seed):
+    def __init__(self, schema, config, total, seed, reference_date=None):
         self.schema, self.config, self.total, self.seed = schema, validate_web_config(schema, config), total, seed
-        self.base = Sampler(schema, seed)
+        self.base = Sampler(schema, seed, reference_date)
         self.last_profile = None
         self.exact = total > 0 and not schema["branching"] and not any(
             field["exclusive_columns"] for field in schema["fields"])
@@ -1935,29 +2006,66 @@ class WebApplication:
                 raise FormError("Phiên đọc form không còn tồn tại. Hãy đọc lại.")
             return dict(state)
 
-    def job_state(self, job_id):
+    def job_state(self, job_id, compact=False):
+        import copy
         with self.lock:
             job = self.jobs.get(job_id)
             if job is None:
                 raise FormError("Không tìm thấy lượt chạy.")
-            return json.loads(json.dumps({key: value for key, value in job.items() if key not in ("stop_event", "schema", "config", "access_key_hash", "access_activation_id", "owner_id", "guest_id")}, ensure_ascii=False))
+            excluded = {"stop_event", "control", "schema", "config", "access_key_hash", "access_activation_id", "owner_id", "guest_id"}
+            if compact:
+                excluded.update(("counts", "answered_counts", "last_profile"))
+            snapshot = {key: value for key, value in job.items() if key not in excluded}
+            if compact:
+                snapshot["events"] = job.get("events", [])[-12:]
+            snapshot["elapsed_seconds"] = round(max(0, time.time() - job.get("created_at", time.time())), 1)
+            return copy.deepcopy(snapshot)
 
-    def export_job(self, job_id):
+    def report_job(self, job_id):
+        import copy
+        from teaching_tools import summary_report, TeachingToolsError
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                raise FormError("Không tìm thấy lượt chạy.")
+            snapshot = copy.deepcopy({key: job.get(key) for key in ("mode", "confirmed", "status", "counts", "answered_counts")})
+            schema = job["schema"]
+        try:
+            return summary_report(schema, snapshot)
+        except TeachingToolsError as exc:
+            raise FormError(str(exc)) from exc
+
+    def preset(self, scan_id, payload):
+        from teaching_tools import ratio_preset, TeachingToolsError
+        state = self.scan_state(scan_id)
+        if state["status"] != "ready":
+            raise FormError("Biểu mẫu chưa sẵn sàng.")
+        config = validate_web_config(state["schema"], payload.get("config"))
+        try:
+            result = ratio_preset(state["schema"], config, payload.get("preset"))
+            return {"config": validate_web_config(state["schema"], result)}
+        except TeachingToolsError as exc:
+            raise FormError(str(exc)) from exc
+
+    def export_job(self, job_id, kind="sav"):
         from spss_export import export_spss, SpssExportError
+        from teaching_tools import export_csv_bundle, TeachingToolsError
+        if kind not in ("sav", "zip"):
+            raise FormError("Định dạng xuất không hợp lệ.")
         with self.lock:
             job = self.jobs.get(job_id)
             if job is None or not job.get("confirmed") or not job.get("log_path"):
-                raise FormError("Chưa có phản hồi được xác nhận để xuất SPSS. Điền thử không tạo dữ liệu đã gửi.")
+                raise FormError("Chưa có phản hồi được xác nhận để xuất dữ liệu. Điền thử không tạo dữ liệu đã gửi.")
             schema, log_path = job["schema"], job["log_path"]
         if not self.export_lock.acquire(blocking=False):
-            raise FormError("Máy chủ đang xuất một file SPSS. Vui lòng thử lại sau khi hoàn tất.")
+            raise FormError("Máy chủ đang xuất dữ liệu SPSS/CSV. Vui lòng thử lại sau khi hoàn tất.")
         target = None
         try:
-            descriptor, filename = tempfile.mkstemp(prefix="KDautoform_", suffix=".sav")
+            descriptor, filename = tempfile.mkstemp(prefix="KDautoform_", suffix="." + kind)
             os.close(descriptor)
             target = Path(filename)
-            return export_spss(schema, log_path, target)
-        except SpssExportError as exc:
+            return (export_spss if kind == "sav" else export_csv_bundle)(schema, log_path, target)
+        except (SpssExportError, TeachingToolsError) as exc:
             if target:
                 target.unlink(missing_ok=True)
             raise FormError(str(exc)) from exc
@@ -1976,6 +2084,7 @@ class WebApplication:
 
     def start_job(self, payload):
         import threading
+        from run_scheduling import parse_schedule, RunControl
         state = self.scan_state(str(payload.get("scan_id", "")))
         if state["status"] != "ready":
             raise FormError("Biểu mẫu chưa sẵn sàng.")
@@ -1985,6 +2094,21 @@ class WebApplication:
         delay = payload.get("delay", 2)
         if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
             raise FormError("Khoảng nghỉ không hợp lệ.")
+        schedule = parse_schedule(payload.get("schedule"), legacy_delay=delay)
+        seed = payload.get("seed")
+        if seed is None:
+            seed = secrets.randbits(48)
+        elif type(seed) is not int or not 0 <= seed <= 9007199254740991:
+            raise FormError("Seed phải là số nguyên từ 0 đến 9007199254740991 hoặc để trống.")
+        reference = payload.get("reference_date")
+        if reference is None:
+            reference = datetime.now().astimezone().date().isoformat()
+        try:
+            if not isinstance(reference, str):
+                raise ValueError()
+            reference = date.fromisoformat(reference).isoformat()
+        except ValueError as exc:
+            raise FormError("Ngày tham chiếu cần có dạng YYYY-MM-DD hợp lệ.") from exc
         config = validate_web_config(state["schema"], payload.get("config"))
         mode = "check" if self.force_check else payload.get("mode", "send")
         if mode not in ("check", "send"):
@@ -1992,15 +2116,18 @@ class WebApplication:
         job_id = secrets.token_hex(8)
         job = {"id": job_id, "status": "queued", "mode": mode, "requested": count,
                "total": 1 if mode == "check" else count, "processed": 0, "confirmed": 0,
-               "current_page": 0, "current_question": "", "events": [], "counts": {},
+               "current_page": 0, "current_question": "", "events": [], "counts": {}, "answered_counts": {},
                "schema": state["schema"], "config": config, "delay": float(delay),
+               "schedule": schedule, "paused": False, "pause_requested": False, "waiting": False,
+               "next_run_at": None, "remaining_seconds": 0,
                "headless": self.headless_only or bool(payload.get("headless", True)), "stop_event": threading.Event(),
                "created_at": time.time(), "updated_at": time.time(), "title": state["schema"]["title"],
-               "seed": secrets.randbits(48), "access_key_id": payload.get("_key_id"),
+               "seed": seed, "reference_date": reference, "access_key_id": payload.get("_key_id"),
                "owner_id": payload.get("_owner_id"), "guest_id": payload.get("_guest_id"),
                "access_activation_id": payload.get("_activation_id", ""),
                "access_key_hash": payload.get("_key_hash", ""), "exact": count > 0 and not state["schema"]["branching"]
                and not any(field["exclusive_columns"] for field in state["schema"]["fields"])}
+        job["control"] = RunControl(job["stop_event"])
         with self.lock:
             if self.headless_only and any(item["status"] == "scanning" for item in self.scans.values()):
                 raise FormError("Máy chủ đang đọc form. Vui lòng chờ đọc xong rồi bắt đầu.")
@@ -2009,7 +2136,7 @@ class WebApplication:
             if not job["owner_id"] or not active_job_key(job, self.key_store):
                 raise FormError("Phiên sử dụng không hợp lệ. Vui lòng tải lại trang.")
             if not job["access_key_id"]:
-                usage = self.key_store.guest_usage(job["guest_id"])
+                usage = self.key_store.guest_usage(job["guest_id"], fresh=True)
                 if not usage["remaining"]:
                     raise QuotaExceeded("Bạn đã dùng hết 10 lượt miễn phí. Mua key unlimited 30.000đ/key để tiếp tục.")
                 if mode == "send" and (count == 0 or count > usage["remaining"]):
@@ -2035,6 +2162,8 @@ class WebApplication:
                 job.update(status="error", error=str(exc), current_question="")
             self.event(job, str(exc), "error")
         finally:
+            with self.lock:
+                job.update(paused=False, pause_requested=False, waiting=False, next_run_at=None, remaining_seconds=0)
             if job["mode"] == "send" and job["access_key_id"]:
                 try:
                     self.key_store.finish(job["access_key_id"], job["access_key_hash"], job["id"], job["status"])
@@ -2042,12 +2171,21 @@ class WebApplication:
                     self.event(job, "Chưa cập nhật được kết quả vào kho key. Kiểm tra kết nối CSDL.", "warning")
 
     def _run_job(self, job):
+        from run_scheduling import sample_interval
         schema, stop = job["schema"], job["stop_event"]
         app = self
+        control = job["control"]
+        def control_state(value):
+            with app.lock:
+                job.update(value)
+        def allowed():
+            return active_job_key(job, app.key_store)
+        def checkpoint():
+            if not control.checkpoint(access_check=allowed, on_state=control_state):
+                raise WebStopRequested()
         class ProgressBrowser(form_browser(schema["url"])):
             def fill_field(self, field, value):
-                if stop.is_set() or not active_job_key(job, app.key_store):
-                    raise WebStopRequested()
+                checkpoint()
                 with app.lock:
                     changed = job["current_page"] != field["page"] + 1
                     job.update(current_page=field["page"] + 1, current_question=field["question"])
@@ -2063,44 +2201,68 @@ class WebApplication:
             job.update(status="running", log_path=str(path))
         log.write({"event": "run", "synthetic": True, "url": schema["url"], "count": job["requested"],
                    "seed": job["seed"], "config": job["config"], "mode": job["mode"],
-                   "provider": schema.get("provider", "google")})
+                   "provider": schema.get("provider", "google"), "schedule": job["schedule"],
+                   "reference_date": job["reference_date"]})
         self.event(job, "Đã kích hoạt công cụ. Mở trình duyệt để điền toàn bộ biểu mẫu.")
         try:
-            sampler = WebRatioSampler(schema, job["config"], job["requested"], job["seed"])
+            sampler = WebRatioSampler(schema, job["config"], job["requested"], job["seed"], job["reference_date"])
+            timing_rng = random.Random(job["seed"] ^ 0x4B4454494D45)
+            previous_started = None
             with ProgressBrowser(headless=job["headless"]) as browser:
                 for index in itertools.count(1):
                     if job["total"] and index > job["total"]:
                         break
-                    if stop.is_set() or not active_job_key(job, app.key_store):
+                    interval = sample_interval(job["schedule"], timing_rng) if previous_started is not None else 0
+                    if not control.await_next(previous_started, interval, access_check=allowed, on_state=control_state):
                         raise WebStopRequested()
-                    if index > 1 and stop.wait(job["delay"]):
-                        raise WebStopRequested()
+                    previous_started = time.monotonic()
                     with self.lock:
                         job.update(current_page=0, current_question="", current_index=index)
                     self.event(job, f'Bắt đầu lượt {index}.')
                     answers = sampler.sample(index)
                     browser.profile = sampler.last_profile
                     report = browser.prepare(schema, answers)
-                    if stop.is_set() or not active_job_key(job, app.key_store):
-                        raise WebStopRequested()
+                    checkpoint()
                     log.write({"event": "filled", "index": index, "report": report,
                                "answers": answers, "profile": sampler.last_profile})
                     if job["mode"] == "send":
-                        if not job["access_key_id"]:
-                            self.key_store.consume_guest(job["guest_id"])
-                        log.write({"event": "started", "index": index})
+                        reserved = attempted = False
                         try:
+                            if not job["access_key_id"]:
+                                self.key_store.consume_guest(job["guest_id"])
+                                reserved = True
+                            checkpoint()
+                            log.write({"event": "started", "index": index})
+                            checkpoint()
+                            attempted = True
                             browser.submit(schema)
+                        except WebStopRequested:
+                            raise
                         except Exception as exc:
-                            log.write({"event": "unconfirmed", "index": index, "error": str(exc)})
+                            if attempted:
+                                log.write({"event": "unconfirmed", "index": index, "error": str(exc)})
                             raise FormError(str(exc)) from exc
+                        finally:
+                            if reserved and not attempted:
+                                try:
+                                    self.key_store.release_guest(job["guest_id"])
+                                except FormError:
+                                    self.event(job, "Chưa hoàn được lượt giữ chỗ chưa gửi. Kiểm tra kết nối kho lượt.", "warning")
                         log.write({"event": "confirmed", "index": index, "report": report})
                     with self.lock:
                         job["processed"] += 1
                         if job["mode"] == "send":
                             job["confirmed"] += 1
+                        elapsed = max(0, time.monotonic() - previous_started)
+                        job["response_duration_total"] = job.get("response_duration_total", 0) + elapsed
+                        job["average_response_seconds"] = round(job["response_duration_total"] / job["processed"], 2)
                         for field in schema["fields"]:
-                            if field["options"] and field["page"] in report["page_indices"]:
+                            visited = (field["id"] in report["field_ids"] if "field_ids" in report
+                                       else field["page"] in report["page_indices"])
+                            if not visited or job["mode"] != "send":
+                                continue
+                            job["answered_counts"][field["id"]] = job["answered_counts"].get(field["id"], 0) + 1
+                            if field["options"]:
                                 value = answers[field["id"]]
                                 selected = value if isinstance(value, list) else [value]
                                 counts = job["counts"].setdefault(field["id"], {})
@@ -2128,8 +2290,20 @@ class WebApplication:
                 raise FormError("Không tìm thấy lượt chạy.")
             if job["status"] in ("queued", "running", "stopping"):
                 job.update(status="stopping")
-                job["stop_event"].set()
+                if job.get("control"):
+                    job["control"].stop()
+                else:
+                    job["stop_event"].set()
         return self.job_state(job_id)
+
+    def pause_job(self, job_id, paused=True):
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None or job["status"] not in ("queued", "running") or not job.get("control"):
+                raise FormError("Chỉ tạm dừng hoặc tiếp tục đợt đang hoạt động.")
+            job["pause_requested"] = paused
+            (job["control"].pause if paused else job["control"].resume)()
+        return self.job_state(job_id, compact=True)
 
 
 def web_settings(port=None, host=None):
@@ -2200,8 +2374,8 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                 return None
             return hashlib.sha256(raw.encode()).hexdigest() if re.fullmatch(r"[A-Za-z0-9_-]{43}", raw) else None
 
-        def access_state(self, session):
-            usage = key_store.guest_usage(session["guest_id"])
+        def access_state(self, session, fresh=False):
+            usage = key_store.guest_usage(session["guest_id"], fresh=fresh)
             paid = bool(session.get("key_id"))
             return {"authenticated": paid, "plan": "unlimited" if paid else "free",
                     "key_name": session.get("key_id"), "key_used": False,
@@ -2252,8 +2426,9 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     return
                 if path == "/api/state":
                     self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only,
-                                     "version": "6.0", "name": "KDautoform", "providers": ["google", "microsoft", "html"],
-                                     "spss_export": spss_available(), **self.access_state(session)})
+                                     "version": "7.0", "name": "KDautoform", "providers": ["google", "microsoft", "html"],
+                                     "spss_export": spss_available(), "csv_export": True, "scheduling": True,
+                                     "teaching_tools": True, "compact_poll": True, **self.access_state(session)})
                 elif path.startswith("/api/scans/"):
                     scan_id = path.rsplit("/", 1)[-1]
                     self.require_owner("scan", scan_id, session)
@@ -2273,14 +2448,15 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     with target.open("rb") as handle:
                         while chunk := handle.read(65536):
                             self.wfile.write(chunk)
-                elif path.startswith("/api/jobs/") and path.endswith("/export.sav"):
+                elif path.startswith("/api/jobs/") and path.endswith(("/export.sav", "/export.zip")):
                     job_id = path.split("/")[3]
                     self.require_owner("job", job_id, session)
-                    target = app.export_job(job_id)
+                    kind = "zip" if path.endswith(".zip") else "sav"
+                    target = app.export_job(job_id, kind=kind)
                     try:
                         self.send_response(200)
                         self.send_header("Content-Type", "application/octet-stream")
-                        self.send_header("Content-Disposition", 'attachment; filename="KDautoform_' + job_id + '.sav"')
+                        self.send_header("Content-Disposition", 'attachment; filename="KDautoform_' + job_id + '.' + kind + '"')
                         self.send_header("Content-Length", str(target.stat().st_size))
                         self.send_header("Cache-Control", "no-store")
                         self.send_header("X-Content-Type-Options", "nosniff")
@@ -2290,10 +2466,14 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                                 self.wfile.write(chunk)
                     finally:
                         target.unlink(missing_ok=True)
+                elif path.startswith("/api/jobs/") and path.endswith("/report"):
+                    job_id = path.split("/")[3]
+                    self.require_owner("job", job_id, session)
+                    self.reply(200, app.report_job(job_id))
                 elif path.startswith("/api/jobs/"):
                     job_id = path.rsplit("/", 1)[-1]
                     self.require_owner("job", job_id, session)
-                    self.reply(200, app.job_state(job_id))
+                    self.reply(200, {**app.job_state(job_id, compact=True), **self.access_state(session)})
                 else:
                     self.reply(404, {"error": "Không tìm thấy địa chỉ."})
             except FormError as exc:
@@ -2353,6 +2533,10 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     with app.lock:
                         app.scans[result["scan_id"]]["owner_id"] = session["owner_id"]
                     self.reply(202, result)
+                elif path.startswith("/api/scans/") and path.endswith("/preset"):
+                    scan_id = path.split("/")[3]
+                    self.require_owner("scan", scan_id, session)
+                    self.reply(200, app.preset(scan_id, payload))
                 elif path == "/api/jobs":
                     self.require_owner("scan", str(payload.get("scan_id", "")), session)
                     payload["_key_id"] = session["key_id"]
@@ -2365,10 +2549,14 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     job_id = path.split("/")[3]
                     self.require_owner("job", job_id, session)
                     self.reply(200, app.stop_job(job_id))
+                elif path.startswith("/api/jobs/") and path.endswith(("/pause", "/resume")):
+                    job_id = path.split("/")[3]
+                    self.require_owner("job", job_id, session)
+                    self.reply(200, {**app.pause_job(job_id, paused=path.endswith("/pause")), **self.access_state(session)})
                 else:
                     self.reply(404, {"error": "Không tìm thấy thao tác."})
             except QuotaExceeded as exc:
-                self.reply(402, {"error": str(exc), **self.access_state(session)})
+                self.reply(402, {"error": str(exc), **self.access_state(session, fresh=True)})
             except KeyAlreadyUsed as exc:
                 self.reply(403, {"error": str(exc)})
             except (FormError, ValueError, TypeError, KeyError) as exc:
@@ -2406,7 +2594,10 @@ def start_web(port=None, open_browser=True, force_check=False, host=None):
         pass
     finally:
         for job in app.jobs.values():
-            job["stop_event"].set()
+            if job.get("control"):
+                job["control"].stop()
+            else:
+                job["stop_event"].set()
         server.server_close()
         if previous_handler is not None:
             signal.signal(signal.SIGTERM, previous_handler)

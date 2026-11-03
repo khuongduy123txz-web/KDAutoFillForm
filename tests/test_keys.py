@@ -159,7 +159,7 @@ class KeyStoreTests(unittest.TestCase):
                 return False
         with ThreadPoolExecutor(max_workers=len(stores)) as pool:
             self.assertEqual(sum(pool.map(consume, range(len(stores)))), 10)
-        self.assertEqual(self.store.guest_usage(guest)["used"], 10)
+        self.assertEqual(self.store.guest_usage(guest, fresh=True)["used"], 10)
 
 
 @unittest.skipUnless(os.environ.get("KD_TEST_DATABASE_URL"), "PostgreSQL test database not configured")
@@ -196,7 +196,10 @@ class PostgreSQLKeyTests(unittest.TestCase):
             try:
                 with ThreadPoolExecutor(max_workers=len(stores)) as pool:
                     self.assertEqual(sum(pool.map(consume, range(len(stores)))), 10)
-                self.assertEqual(stores[0].guest_usage(guest)["remaining"], 0)
+                self.assertEqual(stores[0].guest_usage(guest, fresh=True)["remaining"], 0)
+                self.assertEqual(stores[0].release_guest(guest)["used"], 9)
+                self.assertEqual(stores[1].guest_usage(guest, fresh=True)["remaining"], 1)
+                self.assertEqual(stores[1].consume_guest(guest)["used"], 10)
             finally:
                 with stores[0].connection() as connection:
                     stores[0].execute(connection, "DELETE FROM kd_guest_usage WHERE guest_id = ?", (guest,))

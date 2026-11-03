@@ -1,6 +1,6 @@
 # KDautoform
 
-Giao diện web và công cụ Python tạo dữ liệu giả để kiểm thử form bạn quản lý. **Google Forms là chức năng chính**, giữ cách đọc toàn bộ các trang, điều chỉnh tỷ lệ từng câu và tạo hồ sơ giả tiếng Việt. Bản này thêm Microsoft Forms công khai, chế độ thử nghiệm cho form HTML tiêu chuẩn và xuất kết quả đã xác nhận sang SPSS `.sav`.
+KDautoform phục vụ học sinh, sinh viên và giảng viên kiểm thử biểu mẫu, minh họa cách phân bổ câu trả lời và thực hành thống kê bằng **dữ liệu mô phỏng**. **Google Forms là chức năng chính**, giữ đọc toàn bộ các trang, phân nhánh, điều chỉnh tỷ lệ từng câu và hồ sơ giả tiếng Việt. Công cụ còn hỗ trợ Microsoft Forms công khai, form HTML tiêu chuẩn ở chế độ thử nghiệm, lịch chạy tùy chỉnh và xuất dữ liệu SPSS/CSV.
 
 ## Chạy trên máy Windows
 
@@ -14,7 +14,7 @@ python google_form_tool.py --web
 
 Mở http://127.0.0.1:8765 để vào thẳng trang chủ và dùng miễn phí 10 lượt gửi, không cần key. Dùng `--web --check` để kiểm tra mọi trang mà chưa gửi phản hồi. Khi cần mở khóa không giới hạn lượt, chủ công cụ tạo key bằng `python google_form_tool.py --key-generate`.
 
-Giữ các file `google_form_tool.py`, `microsoft_forms.py`, `html_forms.py`, `spss_export.py` và `requirements.txt` cùng thư mục. `--setup` cài các thư viện trong requirements cùng Chromium; không chỉ sao chép riêng file Python chính sang máy khác.
+Giữ các file `google_form_tool.py`, `microsoft_forms.py`, `html_forms.py`, `spss_export.py`, `run_scheduling.py`, `teaching_tools.py` và `requirements.txt` cùng thư mục. `--setup` cài các thư viện trong requirements cùng Chromium; không chỉ sao chép riêng file Python chính sang máy khác.
 
 ## Chọn loại biểu mẫu
 
@@ -41,6 +41,68 @@ python google_form_tool.py --url "https://website-cua-ban.example/khao-sat" --pr
 ```
 
 Thay các địa chỉ minh họa bằng link form bạn quản lý. `--check` điền thử và dừng trước nút Gửi; bỏ `--check` khi đã kiểm tra xong và muốn gửi thật. `--provider auto` không tự nhận mọi URL lạ là form HTML.
+
+## Tốc độ chạy và tạm dừng
+
+Trong phần tốc độ trên web, chọn một cấu hình nhanh hoặc đặt khoảng cách riêng:
+
+| Cấu hình | Cách hoạt động |
+| --- | --- |
+| Nhanh, 2 giây | Khoảng cách bắt đầu tối thiểu giữa hai lượt là 2 giây; đây là cấu hình mặc định. |
+| Mỗi 30 giây | Cố định 30 giây giữa các lần bắt đầu. |
+| Ngẫu nhiên 30 giây–3 phút | Mỗi lượt tiếp theo lấy một khoảng từ 30 đến 180 giây. |
+| Mỗi 3 phút | Cố định 180 giây giữa các lần bắt đầu. |
+| Tùy chỉnh | Cố định hoặc ngẫu nhiên trong khoảng 0–86.400 giây. |
+
+**Khoảng cách được tính từ lúc bắt đầu lượt trước đến lúc bắt đầu lượt sau.** Lượt đầu chạy ngay. Công cụ chỉ chạy lần lượt: nếu một form mất lâu hơn khoảng cách đã đặt, lượt kế tiếp chờ form đó hoàn tất. Không chạy chồng nhiều trình duyệt và không dồn các lượt để bù thời gian bị trễ. Thời gian hoàn thành hiển thị là ước tính; tốc độ mạng và độ dài form có thể làm thời gian thực tế lớn hơn.
+
+Ví dụ muốn “30 giây–3 phút mới có một phản hồi mới”, chọn cấu hình ngẫu nhiên 30–180 giây. Đây là nhịp bắt đầu lượt; không bảo đảm biểu mẫu dài sẽ hoàn thành trong 30 giây.
+
+- **Tạm dừng** giữ lượt hiện tại để tiếp tục. Công cụ dừng ở các điểm kiểm tra giữa câu hỏi và ngay trước khi gửi; một yêu cầu mạng đã bắt đầu có thể hoàn tất trước khi tạm dừng có hiệu lực.
+- **Tiếp tục** đi tiếp từ vị trí tạm dừng. Nếu đang chờ đến lượt sau, phần thời gian chờ còn lại được giữ khi tạm dừng.
+- **Dừng** kết thúc đợt chạy. Các phản hồi đã được xác nhận vẫn xem và tải được.
+- Đọc form, chờ theo lịch hoặc tạm dừng không tự trừ lượt miễn phí. Hạn mức chỉ giảm ngay trước thao tác gửi như trước.
+
+Đợt chạy và lịch hiện tại nằm trong RAM của máy chủ. Render Free có thể ngủ hoặc khởi động lại; công cụ không bảo đảm lịch chạy dài hay chạy qua đêm sẽ tự tiếp tục sau restart. Giữ nhật ký và kiểm tra phản hồi đã lưu trước khi bắt đầu lại.
+
+## Công cụ thực hành thống kê
+
+Sau khi đọc form, có thể chọn một mẫu phân bổ nhanh:
+
+- **Cân bằng:** chia đều các đáp án của những câu trắc nghiệm phù hợp.
+- **Trung lập:** tập trung hơn vào mức giữa của thang điểm/đồng ý đã nhận diện.
+- **Đồng ý nhẹ:** dịch xác suất vừa phải về phía mức đồng ý hoặc điểm cao.
+
+Các mẫu giữ cấu hình câu chữ, thông tin nhân khẩu học và câu chọn nhiều; công cụ chỉ chỉnh những câu phù hợp với mẫu đó. Bạn vẫn sửa từng tỷ lệ, dùng nút ngẫu nhiên và hoàn tác như trước. Mẫu phân bổ là cấu hình để thực hành, không phải kết quả kiểm định Cronbach's Alpha, EFA hay ý nghĩa thống kê được bảo đảm.
+
+Ô **seed** giúp tái tạo việc sinh câu trả lời: để trống để lấy seed ngẫu nhiên, hoặc nhập số nguyên từ `0` đến `9007199254740991`. Cùng seed, cấu trúc form, cấu hình và ngày tham chiếu giúp tạo lại cùng bộ câu trả lời mô phỏng. Seed không cố định thời điểm mạng, dấu thời gian của dịch vụ hoặc trạng thái CAPTCHA; form đã thay đổi cũng có thể cho kết quả khác.
+
+**Ngày tham chiếu** là ngày dùng để tạo hồ sơ, tính tuổi và chọn các giá trị ngày liên quan. Mặc định dùng ngày hiện tại theo trình duyệt; có thể chọn lại theo định dạng `YYYY-MM-DD` để tái tạo một buổi thực hành trước. Seed và ngày tham chiếu được giữ trong nhật ký và metadata của gói ZIP. Khi muốn so sánh hai lần chạy, giữ cả hai giá trị cùng cấu hình và cấu trúc form.
+
+Báo cáo kết quả mô tả **các lượt gửi đã được xác nhận**, gồm tần số và tỷ lệ đáp án, số quan sát hợp lệ và số bỏ qua do phân nhánh. Trung bình và độ lệch chuẩn mẫu chỉ hiển thị với thang điểm hoặc nhãn mức độ có thể mã hóa rõ ràng; không tự gán ý nghĩa số cho các nhóm như trường học hay giới tính. Câu chọn nhiều có thể có tổng tỷ lệ đáp án vượt 100%. Trung bình/SD dùng đúng bảng mã CSV/SPSS, kể cả khi đáp án hiển thị theo thứ tự đảo; mở tần suất từng câu để xem mã tương ứng.
+
+### Tải bộ dữ liệu CSV cho bài thực hành
+
+Trong phần kết quả, tải gói ZIP để mở bằng Excel hoặc phần mềm thống kê:
+
+| File trong ZIP | Nội dung |
+| --- | --- |
+| `responses.csv` | Mỗi hàng là một lượt gửi đã xác nhận, mã hóa đáp án giống file SPSS. |
+| `codebook.csv` | Tên biến, nhãn câu hỏi, kiểu biến và mã/nhãn đáp án. |
+| `summary.json` | Thống kê mô tả tại thời điểm xuất. |
+| `metadata.json` | Nguồn form, cấu hình phiên chạy và cờ `synthetic: true`. |
+| `README.txt` | Giải thích dữ liệu mô phỏng, quy tắc mã hóa và giá trị thiếu. |
+
+CSV dùng UTF-8 BOM để giữ tiếng Việt khi mở trong Excel. Câu bị bỏ qua theo nhánh được để thiếu; các lượt chưa xác nhận, lượt điền thử và xác nhận trùng không trở thành hàng dữ liệu. Văn bản có thể bị Excel hiểu là công thức được thêm dấu nháy đơn khi xuất. Tải gói dữ liệu không trừ thêm lượt và không thay đổi hiệu lực key unlimited.
+
+## Các tối ưu trong bản này
+
+- Giảm truy vấn đọc hạn mức lặp lại trong lúc điền từng câu bằng bộ nhớ đệm tối đa 2.048 mục, hết hạn sau 1 giây. Kiểm tra hạn mức mới được thực hiện khi bắt đầu đợt; việc trừ lượt vẫn là một câu SQL nguyên tử, bảo đảm không gửi vượt 10 lượt miễn phí dù dữ liệu hiển thị tạm thời còn cũ.
+- Gộp thông tin quyền sử dụng vào phản hồi tiến độ, giảm một lượt HTTP cho mỗi lần cập nhật. Giao diện cập nhật khoảng 2 giây khi chạy, 5 giây khi chờ và 15 giây khi tab bị ẩn; lỗi mạng tạm thời được thử lại.
+- Chỉ gửi bản chụp tiến độ gọn cho giao diện. Cấu hình đầy đủ, báo cáo và dữ liệu xuất được xử lý qua thao tác tương ứng.
+- Giữ cách tách phiên trình duyệt cho từng phản hồi và kiểm tra kết quả gửi; tối ưu không bỏ qua câu hỏi hoặc xác nhận để chạy nhanh hơn.
+
+Phép đo cục bộ với SQLite trên máy phát triển: **100 lần kiểm tra quyền khách giảm từ 100 kết nối/79,91 ms xuống 1 kết nối/0,74 ms**. Một lần trừ lượt giảm từ 2 kết nối xuống 1. Đây là phép đo riêng phần truy cập hạn mức, không có nghĩa toàn bộ việc điền form thực tế nhanh hơn 100 lần; độ dài form, máy chủ dịch vụ và mạng vẫn chi phối thời gian chạy.
 
 ## Xuất dữ liệu sang SPSS
 
@@ -70,8 +132,8 @@ Repository đã có remote `origin` và nhánh `main`:
 ```powershell
 cd C:\Users\DELL\Desktop\toolggform
 git status --short
-git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py microsoft_forms.py html_forms.py spss_export.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py
-git commit -m "Add form providers and SPSS exports"
+git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py tests/test_performance.py tests/test_run_scheduling.py tests/test_teaching_tools.py tests/test_workflow.py
+git commit -m "Optimize runtime and add paced educational workflows"
 git push origin main
 ```
 
@@ -137,7 +199,7 @@ Không cần đặt key người dùng vào biến môi trường. CSDL lưu mã
 Website mở thẳng trang chủ. Mỗi trình duyệt được **10 lượt gửi miễn phí cộng dồn**, không cần tài khoản hoặc key. Một đợt gửi 5 phản hồi sử dụng 5 lượt; có thể chia thành nhiều đợt cho đến khi hết hạn mức.
 
 - **Đọc form và Điền thử không trừ lượt.** Lỗi xảy ra trước thao tác gửi cũng không trừ lượt.
-- Máy chủ trừ một lượt ngay trước mỗi thao tác gửi tới dịch vụ biểu mẫu. Nếu mất kết nối hoặc chưa xác nhận được kết quả sau khi đã bắt đầu gửi, lượt đó vẫn được tính vì dịch vụ có thể đã lưu phản hồi. Hạn mức dùng chung cho các loại form, không có thêm 10 lượt riêng khi đổi tab.
+- Máy chủ trừ một lượt ngay trước mỗi thao tác gửi tới dịch vụ biểu mẫu. Nếu mất kết nối hoặc chưa xác nhận được kết quả sau khi đã bắt đầu gửi, lượt đó vẫn được tính vì dịch vụ có thể đã lưu phản hồi. Hạn mức dùng chung cho các loại form, không có thêm 10 lượt riêng khi đổi tab. Nếu dừng sau bước giữ chỗ nhưng trước khi bắt đầu gửi, công cụ hoàn lại lượt đó; lỗi kết nối khi hoàn lượt được ghi trong nhật ký.
 - Số lượng gửi miễn phí phải từ 1 đến số lượt còn lại. Số lượng `0` để chạy liên tục chỉ dành cho key unlimited.
 - Hết 10 lượt thì khóa thao tác bắt đầu lượt mới và hiển thị phần mua key. Người dùng vẫn theo dõi lượt đang chạy, dừng và tải nhật ký được.
 - **F5, Ctrl+R, mở lại URL và đăng xuất không đặt lại 10 lượt.** Cookie khách `kd_guest` được lưu tối đa 365 ngày; máy chủ lưu mã băm nhận dạng khách và số lượt đã dùng trong SQLite/PostgreSQL.
@@ -319,6 +381,10 @@ python -B -m unittest discover -s tests -p test_microsoft_forms.py -v
 python -B -m unittest discover -s tests -p test_html_forms.py -v
 python -B -m unittest discover -s tests -p test_spss_export.py -v
 python -B -m unittest discover -s tests -p test_provider_exports.py -v
+python -B -m unittest discover -s tests -p test_performance.py -v
+python -B -m unittest discover -s tests -p test_run_scheduling.py -v
+python -B -m unittest discover -s tests -p test_teaching_tools.py -v
+python -B -m unittest discover -s tests -p test_workflow.py -v
 ```
 
 Các kiểm thử vòng đọc/ghi `.sav` cần cài đủ `requirements.txt`. Bật các bài kiểm thử trình duyệt bằng fixture mô phỏng khi Chromium đã được cài:
@@ -344,7 +410,7 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 
 - Render Free có 512 MB RAM, tự ngủ sau 15 phút không có truy cập. Chromium có thể vượt RAM với form nặng. Nếu log có `Out of memory`/`OOM`, thử form nhỏ hoặc chuyển máy chủ có nhiều RAM hơn. Không bảo đảm chạy liên tục nhiều lượt trên gói miễn phí.
 - Lượt chạy, phiên mở khóa, cấu hình đang chỉnh ở RAM; nhật ký ở thư mục tạm. Chúng không được bảo toàn khi service ngủ, restart hoặc deploy. Trạng thái key và số lượt miễn phí được giữ trong PostgreSQL riêng. Sau restart, nhập lại cùng key unlimited còn hiệu lực. Tải nhật ký trước khi rời phiên; tránh cập nhật source/key lúc đang chạy.
-- Nếu service dừng giữa lúc gửi, kiểm tra phản hồi đã lưu trong form nguồn trước khi bắt đầu lại để tránh gửi trùng. Job web không tự tiếp tục sau restart.
+- Nếu service dừng giữa lúc gửi, kiểm tra phản hồi đã lưu trong form nguồn trước khi bắt đầu lại để tránh gửi trùng. Job web và lịch chờ không tự tiếp tục sau restart; tạm dừng không tạo bản lưu bền vững.
 - Cloud không hiện cửa sổ Chromium trên máy người dùng. Theo dõi tiến độ qua web và nhật ký.
 - Form có đăng nhập, tải tệp, CAPTCHA hoặc quy tắc chưa hỗ trợ sẽ báo dừng.
 
@@ -365,6 +431,8 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 | Form khác báo chưa hỗ trợ | Chọn đúng chế độ HTML thử nghiệm. Website dùng widget, luồng nhiều trang hoặc cơ chế gửi riêng cần bộ kết nối riêng; không đổi URL lạ thành Google Form. |
 | Không có nút tải SPSS hoặc chưa có lượt xác nhận | Điền thử và lượt chưa rõ kết quả không được xuất thành dữ liệu. Chờ có phản hồi đã xác nhận rồi tải. |
 | Xuất SPSS báo thiếu thư viện | Chạy `python -m pip install -r requirements.txt`; khi cloud dùng Docker, deploy lại image có requirements mới. |
+| Lượt sau bắt đầu chậm hơn khoảng cách đã đặt | Khoảng cách là nhịp bắt đầu; form dài/mạng chậm phải hoàn tất trước khi bắt đầu lượt mới. Xem trạng thái chờ hoặc tạm dừng. |
+| Đã bấm tạm dừng nhưng vẫn có một phản hồi hoàn tất | Yêu cầu mạng đang gửi có thể hoàn tất; công cụ tạm dừng ở điểm kiểm tra tiếp theo. |
 | Xuất SPSS vượt giới hạn | Chia số lượt thành đợt nhỏ hơn; giới hạn xuất bảo vệ RAM và không làm mất hiệu lực key unlimited. |
 | Web khởi động chậm sau khi để lâu | Gói Free đang thức dậy; đợi khởi động xong. |
 

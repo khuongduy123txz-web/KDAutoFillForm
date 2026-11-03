@@ -294,6 +294,41 @@ class DeploymentTests(unittest.TestCase):
                 with self.assertRaises(tool.FormError):
                     tool.create_web_server(key_store=self.store)
 
+    def test_pause_resume_and_compact_poll_preserve_guest_ownership(self):
+        payload = self.seed_scan()
+        app = self.server.application
+        with patch.object(app, "run_job", return_value=None):
+            status, _, created = self.request("POST", "/api/jobs", {**payload, "schedule": {
+                "mode": "random", "min_seconds": 30, "max_seconds": 180}, "seed": 42})
+        self.assertEqual(status, 202, created)
+        identifier = created["job_id"]
+        status, _, paused = self.request("POST", "/api/jobs/" + identifier + "/pause", {})
+        self.assertEqual(status, 200, paused)
+        self.assertTrue(paused["pause_requested"])
+        self.assertTrue(app.jobs[identifier]["control"].paused)
+        state = self.request("GET", "/api/jobs/" + identifier)[2]
+        self.assertEqual((state["plan"], state["remaining"], state["seed"]), ("free", 10, 42))
+        self.assertNotIn("counts", state)
+        self.assertNotIn("control", state)
+        other_raw = tool.secrets.token_urlsafe(32)
+        self.store.ensure_guest(hashlib.sha256(other_raw.encode()).hexdigest())
+        self.assertEqual(self.request("POST", "/api/jobs/" + identifier + "/resume", {},
+                                      cookie="kd_guest=" + other_raw, update_cookies=False)[0], 400)
+        self.assertFalse(self.request("POST", "/api/jobs/" + identifier + "/resume", {})[2]["pause_requested"])
+        self.request("POST", "/api/jobs/" + identifier + "/stop", {})
+        self.assertTrue(app.jobs[identifier]["control"].stopped)
+        self.assertEqual(self.store.guest_usage(self.guest_id, fresh=True)["used"], 0)
+
+    def test_ratio_preset_endpoint_does_not_charge_or_accept_unknown_presets(self):
+        payload = self.seed_scan()
+        status, _, result = self.request("POST", "/api/scans/one-scan/preset", {
+            "preset": "balanced", "config": payload["config"]})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["config"], payload["config"])
+        self.assertEqual(self.request("POST", "/api/scans/one-scan/preset", {
+            "preset": "unknown", "config": payload["config"]})[0], 400)
+        self.assertEqual(self.store.guest_usage(self.guest_id, fresh=True)["used"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,8 @@ class ProviderExportTests(unittest.TestCase):
         self.server.application.jobs["test-job"] = {
             "id": "test-job", "status": "completed", "confirmed": confirmed,
             "owner_id": self.owner if owner is None else owner, "schema": schema, "log_path": str(log),
+            "mode": "send", "counts": {"ms.agree": {"Có": 1}} if confirmed else {},
+            "answered_counts": {"ms.name": 1, "ms.agree": 1} if confirmed else {},
         }
 
     def test_state_advertises_providers_and_preserves_free_quota(self):
@@ -121,6 +123,26 @@ class ProviderExportTests(unittest.TestCase):
             self.assertIn("SPSS", json.loads(body)["error"])
         finally:
             app.export_lock.release()
+
+    def test_csv_bundle_and_report_keep_confirmed_counts_and_ownership(self):
+        import io
+        import zipfile
+        self.seed_job()
+        status, _, body = self.request("GET", "/api/jobs/test-job/report")
+        self.assertEqual(status, 200)
+        report = json.loads(body)
+        self.assertEqual((report["confirmed"], report["fields"][0]["valid_n"]), (1, 1))
+        status, headers, body = self.request("GET", "/api/jobs/test-job/export.zip")
+        self.assertEqual(status, 200)
+        self.assertIn(".zip", headers["Content-Disposition"])
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            self.assertIn("codebook.csv", archive.namelist())
+            self.assertTrue(json.loads(archive.read("metadata.json"))["synthetic"])
+            self.assertEqual(json.loads(archive.read("summary.json"))["confirmed"], 1)
+        self.seed_job(owner="other-owner")
+        self.assertEqual(self.request("GET", "/api/jobs/test-job/report")[0], 400)
+        self.assertEqual(self.request("GET", "/api/jobs/test-job/export.zip")[0], 400)
+        self.assertEqual(self.store.guest_usage(self.owner, fresh=True)["used"], 0)
 
 
 if __name__ == "__main__":
