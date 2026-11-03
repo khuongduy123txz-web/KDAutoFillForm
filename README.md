@@ -180,7 +180,7 @@ git push origin main
 
 Repository: https://github.com/khuongduy123txz-web/KDAutoFillForm
 
-Nếu Git báo `rejected (fetch first)`, chạy `git pull --rebase origin main` rồi đẩy lại; nếu có xung đột, giải quyết trước khi tiếp tục. Không dùng `--force`. File `tests/test_batch.py` cũ không thuộc bộ kiểm tra triển khai mới.
+Nếu Git báo `rejected (fetch first)`, chạy `git pull --rebase origin main` rồi đẩy lại; nếu có xung đột, giải quyết trước khi tiếp tục. Không dùng `--force`.
 
 ## Triển khai miễn phí trên Render
 
@@ -429,6 +429,12 @@ python -B -m unittest discover -s tests -p test_teaching_tools.py -v
 python -B -m unittest discover -s tests -p test_workflow.py -v
 ```
 
+Chạy toàn bộ bộ kiểm thử hiện tại:
+
+```powershell
+python -B -m unittest discover -s tests -v
+```
+
 Các kiểm thử vòng đọc/ghi `.sav` cần cài đủ `requirements.txt`. Bật các bài kiểm thử trình duyệt bằng fixture mô phỏng khi Chromium đã được cài:
 
 ```powershell
@@ -439,7 +445,7 @@ python -B -m unittest discover -s tests -p test_microsoft_forms.py -v
 python -B -m unittest discover -s tests -p test_html_forms.py -v
 ```
 
-Fixture mô phỏng kiểm tra khả năng đọc/điền và xác nhận kết quả trong môi trường kiểm thử. Chúng không bảo đảm mọi website hoặc mọi thay đổi giao diện trong tương lai đều tương thích. Không chạy toàn bộ `tests/` bằng mẫu mặc định vì file `test_batch.py` cũ thuộc cấu trúc dự án trước đây.
+Fixture mô phỏng kiểm tra khả năng đọc/điền và xác nhận kết quả trong môi trường kiểm thử. Chúng không bảo đảm mọi website hoặc mọi thay đổi giao diện trong tương lai đều tương thích.
 
 Nếu Docker Desktop đã bật, dùng Linux containers và `.env` đã có `KD_DATABASE_URL`:
 
