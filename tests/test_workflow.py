@@ -29,6 +29,7 @@ class WorkflowTests(unittest.TestCase):
         self.app.scans["scan"] = {"id": "scan", "status": "ready", "schema": self.schema,
                                   "config": tool.default_web_config(self.schema, 42), "owner_id": self.guest}
         self.logs, self.starts, self.submits = {}, [], []
+        self.engines = []
         self.skip = set()
         test = self
 
@@ -43,6 +44,8 @@ class WorkflowTests(unittest.TestCase):
                 pass
             def _prepare(self, schema, answers):
                 test.starts.append(time.monotonic())
+                test.engines.append(self.engine)
+                self.metrics = {"engine": self.engine, "fill_ms": 1.25, "batch_fields": 2}
                 ids = []
                 for field in schema["fields"]:
                     if field["id"] not in test.skip:
@@ -134,11 +137,28 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.submits, [])
         self.assertEqual(self.store.guest_usage(self.guest, fresh=True)["used"], 0)
 
+    def test_engine_selection_and_measured_timing_reach_log_and_compact_poll(self):
+        for engine in ("fast", "compatible"):
+            job = self.start(count=1, engine=engine)
+            self.finish(job)
+            state = self.app.job_state(job["id"], compact=True)
+            self.assertEqual(self.engines[-1], engine)
+            self.assertEqual(state["engine"], engine)
+            self.assertGreaterEqual(state["last_response_seconds"], 0)
+            self.assertEqual(state["last_performance"]["fill_ms"], 1.25)
+            events = self.logs[job["log_path"]]
+            self.assertEqual(events[0]["engine"], engine)
+            performance = [event for event in events if event["event"] == "performance"]
+            self.assertEqual(len(performance), 1)
+            self.assertEqual(performance[0]["seconds"], state["last_response_seconds"])
+        self.assertEqual(self.store.guest_usage(self.guest, fresh=True)["used"], 2)
+
     def test_invalid_seed_and_schedule_do_not_start_or_charge(self):
         for values in ({"seed": True}, {"seed": 1.2}, {"seed": -1}, {"seed": 9007199254740992},
                        {"schedule": {"mode": "random", "min_seconds": 180, "max_seconds": 30}},
                        {"schedule": {"mode": "fixed", "min_seconds": float("nan")}},
-                       {"reference_date": False}, {"reference_date": "2026-02-31"}):
+                       {"reference_date": False}, {"reference_date": "2026-02-31"},
+                       {"engine": "unknown"}, {"engine": None}, {"engine": True}):
             with self.subTest(values=values), self.assertRaises((tool.FormError, ValueError)):
                 self.start(**values)
         self.assertEqual(self.app.jobs, {})

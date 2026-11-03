@@ -14,7 +14,7 @@ python google_form_tool.py --web
 
 Mở http://127.0.0.1:8765 để vào thẳng trang chủ và dùng miễn phí 10 lượt gửi, không cần key. Dùng `--web --check` để kiểm tra mọi trang mà chưa gửi phản hồi. Khi cần mở khóa không giới hạn lượt, chủ công cụ tạo key bằng `python google_form_tool.py --key-generate`.
 
-Giữ các file `google_form_tool.py`, `microsoft_forms.py`, `html_forms.py`, `spss_export.py`, `run_scheduling.py`, `teaching_tools.py` và `requirements.txt` cùng thư mục. `--setup` cài các thư viện trong requirements cùng Chromium; không chỉ sao chép riêng file Python chính sang máy khác.
+Giữ các file `google_form_tool.py`, `google_fast.py`, `microsoft_forms.py`, `html_forms.py`, `spss_export.py`, `run_scheduling.py`, `teaching_tools.py` và `requirements.txt` cùng thư mục. `--setup` cài các thư viện trong requirements cùng Chromium; không chỉ sao chép riêng file Python chính sang máy khác.
 
 ## Chọn loại biểu mẫu
 
@@ -44,19 +44,59 @@ Thay các địa chỉ minh họa bằng link form bạn quản lý. `--check` �
 
 ## Tốc độ chạy và tạm dừng
 
+Có hai thiết lập riêng: **cách xử lý từng form** và **nhịp bắt đầu giữa các lượt**.
+
+### Cách điền Google Forms
+
+- **Nhanh** là mặc định cho Google Forms: gom thao tác điền trên mỗi trang để giảm số lần trao đổi giữa Python và trình duyệt. Các ô chưa xử lý được bằng đường nhanh sẽ dùng cách điền tương thích.
+- **Tương thích** dùng cách điền từng câu như trước, phù hợp khi cần kiểm tra một form có giao diện hoặc điều khiển khác thường.
+- Cả hai cách vẫn kiểm tra cấu trúc, đi qua đủ các trang/nhánh cần thiết và chỉ ghi nhận thành công khi dịch vụ xác nhận. Microsoft Forms và HTML giữ bộ xử lý riêng hiện có.
+
+**Mục tiêu tối ưu là khoảng 2–3 giây cho form Google 4 trang trong điều kiện thuận lợi.** Đây không phải cam kết mọi form đều hoàn tất trong thời gian đó. Tổng thời gian còn gồm tải trang, số lượng và loại câu hỏi, chuyển trang, mạng và chờ Google xác nhận. Đặt nhịp 2 giây không cắt ngắn các bước cần thiết này.
+
+Sau khi dán link, dùng **Điền thử** để kiểm tra đủ các trang trước. Theo dõi thời gian xử lý thực đo của lượt chạy để đánh giá tốc độ trên chính form và máy chủ của bạn.
+
+Trong **Tốc độ, thời gian chạy & tái tạo dữ liệu**, chọn **Cách điền Google Forms → Nhanh**. Kết quả hiển thị thời gian lượt vừa xong và trung bình, không tính thời gian chờ lịch hoặc tạm dừng. Rê chuột vào dòng thời gian để xem các pha tải, điền, chuyển trang, xác nhận và số ô dùng đường nhanh/tương thích. Nhật ký JSONL lưu sự kiện `performance` với đơn vị pha là mili giây; gói ZIP lưu lựa chọn `engine` trong metadata.
+
+Dùng Terminal để kiểm tra đường nhanh, dừng trước nút Gửi:
+
+```powershell
+python google_form_tool.py --url "LINK_FORM_CUA_BAN" --check --headless --engine fast
+```
+
+Đổi sang `--engine compatible` để đối chiếu. Tham số CLI `--delay` vẫn là số giây nghỉ **sau** mỗi lượt; thiết lập nhịp bắt đầu 1 phút/form ở phần web.
+
+### Kết quả đo hiệu năng
+
+Form mô phỏng 4 trang, 40 câu chữ/trắc nghiệm, chạy trong Docker với 1 CPU và RAM 512 MB:
+
+| Phép đo | Tương thích | Nhanh |
+| --- | ---: | ---: |
+| Tổng chuẩn bị và xác nhận | 3,195 giây | 0,626 giây |
+| Riêng thao tác điền | 2,506 giây | 0,146 giây |
+
+Đây là phản hồi mạng được mô phỏng cục bộ để so sánh chi phí xử lý, không phải tốc độ gửi đến Google. Cả hai chế độ đi đủ 4 trang, giữ cùng 40 đáp án và chỉ ghi nhận sau xác nhận.
+
+Trên form Google thực tế đã cung cấp (5 trang, 20 câu), một lượt **điền thử, chưa gửi** đo được khoảng **8,30 giây**: tải 1,85 giây, điền 1,35 giây, chuyển trang 4,97 giây. Cả 20 ô dùng đường nhanh. Độ trễ mạng/chuyển trang vẫn chiếm phần lớn thời gian, nên chưa thể khẳng định mọi form 4 trang sẽ xong trong 2–3 giây.
+
+
+### Chọn nhịp bắt đầu mỗi lượt
+
 Trong phần tốc độ trên web, chọn một cấu hình nhanh hoặc đặt khoảng cách riêng:
 
 | Cấu hình | Cách hoạt động |
 | --- | --- |
-| Nhanh, 2 giây | Khoảng cách bắt đầu tối thiểu giữa hai lượt là 2 giây; đây là cấu hình mặc định. |
+| Nhanh nhất, nhịp 2 giây | Khoảng cách bắt đầu tối thiểu giữa hai lượt là 2 giây; đây là cấu hình mặc định. Không đồng nghĩa thời gian điền chắc chắn là 2 giây. |
+| Mỗi 3 giây | Cố định 3 giây giữa các lần bắt đầu. |
 | Mỗi 30 giây | Cố định 30 giây giữa các lần bắt đầu. |
+| Mỗi 1 phút | Cố định 60 giây giữa các lần bắt đầu. |
 | Ngẫu nhiên 30 giây–3 phút | Mỗi lượt tiếp theo lấy một khoảng từ 30 đến 180 giây. |
 | Mỗi 3 phút | Cố định 180 giây giữa các lần bắt đầu. |
 | Tùy chỉnh | Cố định hoặc ngẫu nhiên trong khoảng 0–86.400 giây. |
 
 **Khoảng cách được tính từ lúc bắt đầu lượt trước đến lúc bắt đầu lượt sau.** Lượt đầu chạy ngay. Công cụ chỉ chạy lần lượt: nếu một form mất lâu hơn khoảng cách đã đặt, lượt kế tiếp chờ form đó hoàn tất. Không chạy chồng nhiều trình duyệt và không dồn các lượt để bù thời gian bị trễ. Thời gian hoàn thành hiển thị là ước tính; tốc độ mạng và độ dài form có thể làm thời gian thực tế lớn hơn.
 
-Ví dụ muốn “30 giây–3 phút mới có một phản hồi mới”, chọn cấu hình ngẫu nhiên 30–180 giây. Đây là nhịp bắt đầu lượt; không bảo đảm biểu mẫu dài sẽ hoàn thành trong 30 giây.
+Ví dụ muốn nhịp **1 phút/form**, chọn cấu hình **1 phút / 60 giây**. Muốn “30 giây–3 phút mới có một phản hồi mới”, chọn cấu hình ngẫu nhiên 30–180 giây. Đây là nhịp bắt đầu lượt; không bảo đảm biểu mẫu dài sẽ hoàn thành trong 30 giây.
 
 - **Tạm dừng** giữ lượt hiện tại để tiếp tục. Công cụ dừng ở các điểm kiểm tra giữa câu hỏi và ngay trước khi gửi; một yêu cầu mạng đã bắt đầu có thể hoàn tất trước khi tạm dừng có hiệu lực.
 - **Tiếp tục** đi tiếp từ vị trí tạm dừng. Nếu đang chờ đến lượt sau, phần thời gian chờ còn lại được giữ khi tạm dừng.
@@ -97,6 +137,7 @@ CSV dùng UTF-8 BOM để giữ tiếng Việt khi mở trong Excel. Câu bị b
 
 ## Các tối ưu trong bản này
 
+- Google Forms có đường điền nhanh theo từng trang, giảm thao tác lặp với trình duyệt; các điều khiển chưa hỗ trợ vẫn quay về cách điền từng câu. Không gửi thẳng dữ liệu để bỏ qua các trang hay bỏ kiểm tra kết quả.
 - Giảm truy vấn đọc hạn mức lặp lại trong lúc điền từng câu bằng bộ nhớ đệm tối đa 2.048 mục, hết hạn sau 1 giây. Kiểm tra hạn mức mới được thực hiện khi bắt đầu đợt; việc trừ lượt vẫn là một câu SQL nguyên tử, bảo đảm không gửi vượt 10 lượt miễn phí dù dữ liệu hiển thị tạm thời còn cũ.
 - Gộp thông tin quyền sử dụng vào phản hồi tiến độ, giảm một lượt HTTP cho mỗi lần cập nhật. Giao diện cập nhật khoảng 2 giây khi chạy, 5 giây khi chờ và 15 giây khi tab bị ẩn; lỗi mạng tạm thời được thử lại.
 - Chỉ gửi bản chụp tiến độ gọn cho giao diện. Cấu hình đầy đủ, báo cáo và dữ liệu xuất được xử lý qua thao tác tương ứng.
@@ -132,8 +173,8 @@ Repository đã có remote `origin` và nhánh `main`:
 ```powershell
 cd C:\Users\DELL\Desktop\toolggform
 git status --short
-git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py tests/test_performance.py tests/test_run_scheduling.py tests/test_teaching_tools.py tests/test_workflow.py
-git commit -m "Optimize runtime and add paced educational workflows"
+git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py google_fast.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_google_speed.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py tests/test_performance.py tests/test_run_scheduling.py tests/test_teaching_tools.py tests/test_workflow.py
+git commit -m "Speed up Google Forms and add one minute pacing"
 git push origin main
 ```
 
@@ -377,6 +418,7 @@ Kiểm tra HTTP, key, hạn mức, hồi quy Google Forms, các bộ đọc form
 python -B -m unittest discover -s tests -p test_deployment.py -v
 python -B -m unittest discover -s tests -p test_keys.py -v
 python -B -m unittest discover -s tests -p test_google_regression.py -v
+python -B -m unittest discover -s tests -p test_google_speed.py -v
 python -B -m unittest discover -s tests -p test_microsoft_forms.py -v
 python -B -m unittest discover -s tests -p test_html_forms.py -v
 python -B -m unittest discover -s tests -p test_spss_export.py -v
@@ -391,6 +433,8 @@ Các kiểm thử vòng đọc/ghi `.sav` cần cài đủ `requirements.txt`. B
 
 ```powershell
 $env:KD_BROWSER_TESTS="1"
+python -B -m unittest discover -s tests -p test_google_regression.py -v
+python -B -m unittest discover -s tests -p test_google_speed.py -v
 python -B -m unittest discover -s tests -p test_microsoft_forms.py -v
 python -B -m unittest discover -s tests -p test_html_forms.py -v
 ```
