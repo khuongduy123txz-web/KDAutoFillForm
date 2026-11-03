@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -13,8 +14,12 @@ import google_form_tool as tool
 class DeploymentTests(unittest.TestCase):
     def setUp(self):
         self.raw_key = tool.create_access_key()
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
         self.settings = dict(tool.live_settings())
         self.settings["keys"] = {"qa": {"sha256": tool.access_key_hash(self.raw_key), "enabled": True}}
+        self.store = tool.KeyStore(Path(self.folder.name) / "keys.sqlite3",
+                                   export_dir=Path(self.folder.name) / "vault", legacy=self.settings["keys"])
         mock_settings = patch.object(tool, "live_settings", return_value=self.settings)
         mock_settings.start()
         self.addCleanup(mock_settings.stop)
@@ -32,7 +37,7 @@ class DeploymentTests(unittest.TestCase):
             "KD_HOST": "", "PORT": "0",
         }
         with patch.dict(os.environ, env):
-            server = tool.create_web_server()
+            server = tool.create_web_server(key_store=self.store)
         thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.02), daemon=True)
         thread.start()
 
@@ -133,20 +138,60 @@ class DeploymentTests(unittest.TestCase):
         with patch.dict(os.environ, {"KD_CLOUD": "1", "KD_PUBLIC_URL": "",
                                       "RENDER_EXTERNAL_URL": "https://kdautoform-test.onrender.com",
                                       "KD_ALLOWED_ORIGINS": "https://custom.example"}):
-            server = tool.create_web_server(port=0, host="127.0.0.1")
+            server = tool.create_web_server(port=0, host="127.0.0.1", key_store=self.store)
         server.server_close()
         self.assertEqual(server.settings["public_url"], "https://kdautoform-test.onrender.com")
         self.assertIn("https://custom.example", server.settings["origins"])
+
+    def seed_scan(self):
+        schema = {"title": "Test", "url": "https://docs.google.com/forms/d/e/test/viewform",
+                  "branching": False, "pages": [{"index": 0}],
+                  "fields": [{"id": "entry.1", "question": "Name", "kind": "text", "options": [],
+                              "rules": [], "exclusive_columns": False}]}
+        config = tool.default_web_config(schema, 42)
+        self.server.application.scans["one-scan"] = {
+            "id": "one-scan", "status": "ready", "schema": schema, "config": config, "access_key_id": "qa"}
+        return {"scan_id": "one-scan", "count": 100, "mode": "send", "config": config}
+
+    def test_one_key_allows_one_batch_then_only_results_remain_available(self):
+        self.login()
+        payload = self.seed_scan()
+        app = self.server.application
+        def complete(job):
+            job.update(status="completed")
+        with patch.object(app, "_run_job", side_effect=complete):
+            status, _, first = self.request("POST", "/api/jobs", payload)
+            self.assertEqual(status, 202, first)
+            self.assertTrue(first["key_used"])
+            self.assertEqual(self.request("GET", "/api/jobs/" + first["job_id"])[0], 200)
+            self.assertTrue(self.request("GET", "/api/state")[2]["key_used"])
+            status, _, second = self.request("POST", "/api/jobs", payload)
+            self.assertEqual(status, 409, second)
+            self.assertTrue(second["key_used"])
+            self.assertEqual(self.request("POST", "/api/auth/login", {"key": self.raw_key})[0], 401)
+
+    def test_preview_does_not_consume_key(self):
+        self.login()
+        payload = self.seed_scan()
+        payload["mode"] = "check"
+        app = self.server.application
+        def complete(job):
+            job.update(status="completed")
+        with patch.object(app, "_run_job", side_effect=complete):
+            status, _, result = self.request("POST", "/api/jobs", payload)
+            self.assertEqual(status, 202, result)
+            self.assertFalse(result["key_used"])
+            self.assertIsNone(self.store.get("qa")["claimed_job"])
 
     def test_invalid_cloud_configuration_reports_clear_error(self):
         base = {"KD_CLOUD": "1", "RENDER_EXTERNAL_URL": "", "KD_ALLOWED_ORIGINS": "",
                 "KD_PUBLIC_URL": "https://kdautoform.example", "PORT": "invalid"}
         with patch.dict(os.environ, base), self.assertRaises(tool.FormError):
-            tool.create_web_server()
+            tool.create_web_server(key_store=self.store)
         for public_url in ("", "https://kdautoform.example/api", "https://user:password@example.com"):
             with self.subTest(url=public_url), patch.dict(os.environ, {**base, "PORT": "0", "KD_PUBLIC_URL": public_url}):
                 with self.assertRaises(tool.FormError):
-                    tool.create_web_server()
+                    tool.create_web_server(key_store=self.store)
 
 
 if __name__ == "__main__":

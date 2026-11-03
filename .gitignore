@@ -49,3 +49,8 @@ node_modules/
 Thumbs.db
 Desktop.ini
 
+# Private key vault and persistent local database
+data/
+private_keys/
+*.sqlite3
+*.sqlite3-*

@@ -22,13 +22,19 @@ from urllib.parse import urlsplit, urlunsplit
 FORM_URL = ""  # DÁN LINK GOOGLE FORM CỦA BẠN VÀO ĐÂY
 
 
-# QUẢN LÝ KEY: thêm/xóa mục, đổi sha256 hoặc bật/tắt enabled; có thể dùng các lệnh --key-*.
-ACCESS_KEYS = {'khach-01': {'sha256': '79d5a508a85cae8564283f6fb0457d53fa1ffbd0a9cb42ddc73b6f545844ce94',
+# KEY CŨ: chỉ nhập sang SQLite một lần. Tạo key mới bằng --key-generate, không dán key thật vào code.
+LEGACY_ACCESS_KEYS = {'khach-01': {'sha256': '79d5a508a85cae8564283f6fb0457d53fa1ffbd0a9cb42ddc73b6f545844ce94',
               'enabled': True},
  'khach-02': {'sha256': '3cbbe5efc2fbf819d8ad5da7e5a67579a7216d509285468de903e81c5b4630cb',
               'enabled': True},
  'khach-03': {'sha256': '538b9ad4bf70ee24058b2edd04249c79f132412f2ddfeaebfa1db4ffb83ec600',
               'enabled': True}}
+
+# KHO KEY: đổi đường dẫn mặc định tại đây, hoặc đặt KD_KEY_DB_PATH / KD_KEY_EXPORT_DIR trong .env.
+# data/access_keys.sqlite3 lưu mã băm + trạng thái đã dùng; private_keys/*.csv chứa KEY THẬT để bạn cấp cho khách.
+KEY_DB_PATH = Path(__file__).resolve().parent / "data" / "access_keys.sqlite3"
+KEY_EXPORT_DIR = Path(__file__).resolve().parent / "private_keys"
+
 
 class FormError(Exception):
     pass
@@ -241,9 +247,9 @@ def live_settings():
         for node in tree.body:
             if isinstance(node, ast.Assign):
                 for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id in ("ACCESS_KEYS", "WEB_HTML"):
+                    if isinstance(target, ast.Name) and target.id in ("LEGACY_ACCESS_KEYS", "WEB_HTML"):
                         values[target.id] = ast.literal_eval(node.value)
-        registry = values["ACCESS_KEYS"]
+        registry = values["LEGACY_ACCESS_KEYS"]
         if not isinstance(registry, dict):
             raise ValueError
         for name, item in registry.items():
@@ -256,7 +262,7 @@ def live_settings():
         _LIVE_SETTINGS_CACHE = {"stamp": stamp, "keys": registry, "html": values["WEB_HTML"]}
         return _LIVE_SETTINGS_CACHE
     except (ValueError, KeyError, SyntaxError, TypeError) as exc:
-        raise FormError("Cấu hình ACCESS_KEYS không hợp lệ. Kiểm tra lại mã trước khi sử dụng.") from exc
+        raise FormError("Cấu hình key cũ không hợp lệ. Kiểm tra lại mã trước khi sử dụng.") from exc
 
 
 def normalize_access_key(value):
@@ -276,70 +282,239 @@ def create_access_key():
     return "KD-" + "-".join(raw[index:index + 8] for index in range(0, 32, 8))
 
 
-def write_access_keys(registry):
-    import ast
-    import pprint
-    path = Path(__file__).resolve()
-    stamp = path.stat().st_mtime_ns
-    source = path.read_text(encoding="utf-8-sig")
-    tree = ast.parse(source)
-    assignment = next((node for node in tree.body if isinstance(node, ast.Assign)
-                       and any(isinstance(target, ast.Name) and target.id == "ACCESS_KEYS"
-                               for target in node.targets)), None)
-    if assignment is None:
-        raise FormError("Không tìm thấy phần ACCESS_KEYS trong file.")
-    lines = source.splitlines(keepends=True)
-    replacement = "ACCESS_KEYS = " + pprint.pformat(registry, sort_dicts=False, width=100) + "\n"
-    updated = "".join(lines[:assignment.lineno - 1]) + replacement + "".join(lines[assignment.end_lineno:])
-    compile(updated, str(path), "exec")
-    if path.stat().st_mtime_ns != stamp:
-        raise FormError("File vừa được sửa ở nơi khác. Chạy lại lệnh quản lý key.")
-    temporary = path.with_suffix(".keys.tmp")
-    temporary.write_text(updated, encoding="utf-8-sig")
-    os.replace(temporary, path)
-    _LIVE_SETTINGS_CACHE["stamp"] = None
+class KeyAlreadyUsed(FormError):
+    pass
+
+
+def load_local_key_environment():
+    path = Path(__file__).resolve().parent / ".env"
+    if not path.is_file():
+        return
+    allowed = {"KD_DATABASE_URL", "KD_KEY_DB_PATH", "KD_KEY_EXPORT_DIR"}
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name, value = name.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if name in allowed:
+            os.environ.setdefault(name, value)
+
+
+class KeyStore:
+    def __init__(self, path=None, database_url=None, export_dir=None, legacy=None):
+        import threading
+        self.database_url = database_url or ""
+        if self.database_url and urlsplit(self.database_url).scheme not in ("postgres", "postgresql"):
+            raise FormError("KD_DATABASE_URL cần là chuỗi kết nối PostgreSQL.")
+        self.path = Path(path or os.environ.get("KD_KEY_DB_PATH") or KEY_DB_PATH).expanduser().resolve()
+        self.export_dir = Path(export_dir or os.environ.get("KD_KEY_EXPORT_DIR") or KEY_EXPORT_DIR).expanduser().resolve()
+        self.cache_lock = threading.RLock()
+        self.cache = {}
+        self.initialize(legacy or {})
+
+    def connection(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def connect():
+            connection = None
+            try:
+                if self.database_url:
+                    try:
+                        import psycopg
+                        from psycopg.rows import dict_row
+                    except ImportError as exc:
+                        raise FormError("Cài thư viện PostgreSQL: python -m pip install -r requirements.txt") from exc
+                    connection = psycopg.connect(self.database_url, connect_timeout=15, row_factory=dict_row)
+                else:
+                    import sqlite3
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    connection = sqlite3.connect(self.path, timeout=30)
+                    connection.row_factory = sqlite3.Row
+                    os.chmod(self.path, 0o600)
+                yield connection
+                connection.commit()
+            except FormError:
+                if connection is not None:
+                    connection.rollback()
+                raise
+            except Exception as exc:
+                if connection is not None:
+                    connection.rollback()
+                raise FormError("Không truy cập được kho key. Kiểm tra đường dẫn hoặc kết nối CSDL; thao tác đã dừng.") from exc
+            finally:
+                if connection is not None:
+                    connection.close()
+
+        return connect()
+
+    def execute(self, connection, sql, parameters=()):
+        return connection.execute(sql.replace("?", "%s") if self.database_url else sql, parameters)
+
+    def initialize(self, legacy):
+        with self.connection() as connection:
+            self.execute(connection, """CREATE TABLE IF NOT EXISTS kd_access_keys (
+                name TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL, claimed_at DOUBLE PRECISION,
+                claimed_job TEXT, finished_at DOUBLE PRECISION, outcome TEXT
+            )""")
+            self.execute(connection, "CREATE TABLE IF NOT EXISTS kd_key_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            inserted = self.execute(connection,
+                "INSERT INTO kd_key_meta (name, value) VALUES (?, ?) ON CONFLICT (name) DO NOTHING",
+                ("legacy_imported_v1", "1")).rowcount
+            if inserted:
+                for name, item in legacy.items():
+                    self.execute(connection,
+                        "INSERT INTO kd_access_keys (name, sha256, enabled, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                        (name, item["sha256"], int(item["enabled"]), time.time()))
+
+    def description(self):
+        return "PostgreSQL (biến KD_DATABASE_URL)" if self.database_url else str(self.path)
+
+    def clear_cache(self):
+        with self.cache_lock:
+            self.cache.clear()
+
+    def get(self, name):
+        with self.cache_lock:
+            cached = self.cache.get(name)
+            if cached and cached[0] > time.monotonic():
+                return dict(cached[1]) if cached[1] else None
+        with self.connection() as connection:
+            row = self.execute(connection, "SELECT * FROM kd_access_keys WHERE name = ?", (name,)).fetchone()
+        result = dict(row) if row else None
+        with self.cache_lock:
+            self.cache[name] = (time.monotonic() + 1, result)
+        return dict(result) if result else None
+
+    def unused_by_hash(self, digest):
+        with self.connection() as connection:
+            row = self.execute(connection,
+                "SELECT * FROM kd_access_keys WHERE sha256 = ? AND enabled = 1 AND claimed_job IS NULL",
+                (digest,)).fetchone()
+        return dict(row) if row else None
+
+    def list(self):
+        with self.connection() as connection:
+            return [dict(row) for row in self.execute(connection, "SELECT * FROM kd_access_keys ORDER BY created_at, name").fetchall()]
+
+    def issue(self, names, rotate=False):
+        import csv
+        names = list(names)
+        if not names or len(set(names)) != len(names):
+            raise FormError("Danh sách tên key bị trống hoặc trùng.")
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,59}", name) for name in names):
+            raise FormError("Tên key dài 1–60 ký tự, gồm chữ không dấu, số, dấu gạch nối, gạch dưới hoặc dấu chấm.")
+        records = [{"name": name, "key": create_access_key(), "created_at": time.time()} for name in names]
+        self.export_dir.mkdir(parents=True, exist_ok=True)
+        export_path = self.export_dir / (datetime.now().strftime("keys_%Y%m%d_%H%M%S_") + secrets.token_hex(4) + ".csv")
+        with self.connection() as connection:
+            for record in records:
+                if rotate:
+                    cursor = self.execute(connection, """UPDATE kd_access_keys SET sha256 = ?, enabled = 1,
+                        created_at = ?, claimed_at = NULL, claimed_job = NULL, finished_at = NULL, outcome = NULL
+                        WHERE name = ?""", (access_key_hash(record["key"]), record["created_at"], record["name"]))
+                else:
+                    cursor = self.execute(connection,
+                        "INSERT INTO kd_access_keys (name, sha256, enabled, created_at) VALUES (?, ?, 1, ?) ON CONFLICT DO NOTHING",
+                        (record["name"], access_key_hash(record["key"]), record["created_at"]))
+                if cursor.rowcount != 1:
+                    raise FormError("Không tạo/đổi được tên key: " + record["name"] + ". Kiểm tra tên đã tồn tại hoặc đã bị xóa.")
+            descriptor = os.open(export_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=("name", "key", "created_at"))
+                writer.writeheader()
+                for record in records:
+                    writer.writerow({**record, "created_at": datetime.fromtimestamp(record["created_at"]).astimezone().isoformat(timespec="seconds")})
+        self.clear_cache()
+        return records, export_path
+
+    def change(self, name, enabled=None, delete=False):
+        with self.connection() as connection:
+            if delete:
+                cursor = self.execute(connection, "DELETE FROM kd_access_keys WHERE name = ?", (name,))
+            else:
+                cursor = self.execute(connection, "UPDATE kd_access_keys SET enabled = ? WHERE name = ?", (int(enabled), name))
+            if cursor.rowcount != 1:
+                raise FormError("Không tìm thấy tên key: " + name)
+        self.clear_cache()
+
+    def claim(self, name, digest, job_id):
+        # CHỈ DÙNG MỘT LẦN: cập nhật có điều kiện trong CSDL; hai tiến trình không thể cùng nhận một key.
+        with self.connection() as connection:
+            cursor = self.execute(connection, """UPDATE kd_access_keys SET claimed_at = ?, claimed_job = ?, outcome = 'running'
+                WHERE name = ? AND sha256 = ? AND enabled = 1 AND claimed_job IS NULL""",
+                (time.time(), job_id, name, digest))
+            if cursor.rowcount != 1:
+                raise KeyAlreadyUsed("Key đã được dùng cho một đợt chạy, đã bị khóa hoặc đã thay đổi. Vui lòng nhập key mới.")
+        self.clear_cache()
+
+    def finish(self, name, digest, job_id, outcome):
+        with self.connection() as connection:
+            self.execute(connection, """UPDATE kd_access_keys SET finished_at = ?, outcome = ?
+                WHERE name = ? AND sha256 = ? AND claimed_job = ?""",
+                (time.time(), outcome, name, digest, job_id))
+        self.clear_cache()
+
+
+_KEY_STORE_CACHE = {"config": None, "store": None}
+
+
+def configured_key_store():
+    cloud = os.environ.get("KD_CLOUD", "").strip().lower() in ("1", "true", "yes") or os.environ.get("RENDER") == "true"
+    database_url = os.environ.get("KD_DATABASE_URL", "").strip()
+    if cloud and not database_url:
+        raise FormError("Cloud cần KD_DATABASE_URL trỏ tới PostgreSQL để nhớ key đã dùng qua các lần restart/deploy. Xem README.")
+    config = (database_url, os.environ.get("KD_KEY_DB_PATH"), os.environ.get("KD_KEY_EXPORT_DIR"))
+    if _KEY_STORE_CACHE["config"] != config:
+        store = KeyStore(database_url=database_url, legacy={} if database_url else live_settings()["keys"])
+        _KEY_STORE_CACHE.update(config=config, store=store)
+    return _KEY_STORE_CACHE["store"]
 
 
 def manage_access_keys(args):
-    registry = json.loads(json.dumps(live_settings()["keys"]))
-    if args.key_list:
-        for name, item in registry.items():
-            print(f'{name}: {"BẬT" if item["enabled"] else "KHÓA"} · {item["sha256"][:12]}…')
-        if not registry:
-            print("Chưa có key. Tạo bằng --key-add TEN.")
+    store = configured_key_store()
+    print("Kho key: " + store.description())
+    if args.key_paths:
+        print("Nơi lưu key thật (CSV riêng tư): " + str(store.export_dir))
         return 0
-    action = next((name for name in ("key_add", "key_rotate", "key_delete", "key_disable", "key_enable")
-                   if getattr(args, name)), None)
-    name = str(getattr(args, action)).strip() if action else ""
-    if not name or len(name) > 60:
-        raise FormError("Tên key cần có từ 1 đến 60 ký tự.")
-    if action == "key_add":
-        if name in registry:
-            raise FormError("Tên key đã tồn tại. Dùng --key-rotate để đổi key.")
-        raw = create_access_key()
-        registry[name] = {"sha256": access_key_hash(raw), "enabled": True}
+    if args.key_list:
+        rows = store.list()
+        for item in rows:
+            status = "KHÓA" if not item["enabled"] else "CHƯA DÙNG" if not item["claimed_job"] else "ĐÃ DÙNG"
+            count = "1/1" if item["claimed_job"] else "0/1"
+            print(f'{item["name"]}: {status} · {count}' + (f' · {item["outcome"]}' if item["outcome"] else ""))
+        if not rows:
+            print("Chưa có key. Tạo bằng --key-generate 1.")
+        return 0
+    if args.key_generate is not None:
+        if args.key_generate <= 0:
+            raise FormError("--key-generate cần số lượng lớn hơn 0.")
+        prefix = datetime.now().strftime("key-%Y%m%d-%H%M%S-") + secrets.token_hex(3)
+        names = [f"{prefix}-{index + 1:03d}" for index in range(args.key_generate)]
+        records, export_path = store.issue(names)
+    elif args.key_add or args.key_rotate:
+        name = (args.key_add or args.key_rotate).strip()
+        records, export_path = store.issue([name], rotate=bool(args.key_rotate))
     else:
-        if name not in registry:
-            raise FormError("Không tìm thấy tên key: " + name)
-        if action == "key_rotate":
-            raw = create_access_key()
-            registry[name]["sha256"] = access_key_hash(raw)
-        elif action == "key_delete":
-            del registry[name]
-        else:
-            registry[name]["enabled"] = action == "key_enable"
-    write_access_keys(registry)
-    if action in ("key_add", "key_rotate"):
-        print(f"Tên: {name}\nKEY: {raw}\nKey được hiển thị một lần; mã nguồn chỉ lưu SHA-256.")
-    else:
-        print("Đã cập nhật key: " + name)
-    print("Thay đổi có hiệu lực ngay, không cần khởi động lại máy chủ.")
+        name = (args.key_delete or args.key_disable or args.key_enable).strip()
+        store.change(name, delete=bool(args.key_delete), enabled=bool(args.key_enable))
+        print("Đã cập nhật: " + name + ". Mở khóa không khôi phục lượt đã dùng.")
+        return 0
+    for record in records:
+        print(f'Tên: {record["name"]}\nKEY: {record["key"]}')
+    print("Đã lưu bản key thật tại: " + str(export_path))
+    print("CSDL chỉ lưu mã băm và trạng thái dùng. Key mới có hiệu lực ngay trên máy chủ dùng cùng CSDL.")
     return 0
 
 
 class AccessSessions:
-    def __init__(self):
+    def __init__(self, key_store=None):
         import threading
+        self.key_store = key_store or configured_key_store()
         self.lock = threading.RLock()
         self.sessions = {}
         self.attempts = {}
@@ -352,21 +527,17 @@ class AccessSessions:
             if len(attempts) >= 6:
                 return None, None, max(1, math.ceil(60 - (now - attempts[0])))
         supplied = access_key_hash(key)
-        matched = None
-        for name, item in live_settings()["keys"].items():
-            equal = secrets.compare_digest(supplied, item["sha256"])
-            if equal and item["enabled"]:
-                matched = name
-        if matched is None:
+        item = self.key_store.unused_by_hash(supplied)
+        if item is None:
             with self.lock:
                 self.attempts.setdefault(client, []).append(now)
             return None, None, 0
         token = secrets.token_urlsafe(32)
-        record = {"key_id": matched, "key_hash": supplied, "expires": now + 12 * 3600}
+        record = {"key_id": item["name"], "key_hash": supplied, "expires": now + 12 * 3600}
         with self.lock:
             self.attempts.pop(client, None)
             self.sessions[token] = record
-            self.sessions = {sid: item for sid, item in self.sessions.items() if item["expires"] > now}
+            self.sessions = {sid: value for sid, value in self.sessions.items() if value["expires"] > now}
         return token, record, 0
 
     def current(self, cookie_header):
@@ -381,14 +552,14 @@ class AccessSessions:
             record = self.sessions.get(token)
         if not record:
             return None
-        item = live_settings()["keys"].get(record["key_id"])
+        item = self.key_store.get(record["key_id"])
         valid = (record["expires"] > time.time() and item and item["enabled"]
                  and secrets.compare_digest(item["sha256"], record["key_hash"]))
         if not valid:
             with self.lock:
                 self.sessions.pop(token, None)
             return None
-        return record
+        return {**record, "key_used": bool(item["claimed_job"]), "key_job_id": item["claimed_job"]}
 
     def logout(self, cookie_header):
         from http.cookies import SimpleCookie, CookieError
@@ -402,12 +573,16 @@ class AccessSessions:
             pass
 
 
-def active_job_key(job):
+def active_job_key(job, key_store=None):
     name = job.get("access_key_id")
     if not name:
-        return True
-    item = live_settings()["keys"].get(name)
-    return bool(item and item["enabled"] and secrets.compare_digest(item["sha256"], job["access_key_hash"]))
+        return False
+    item = (key_store or configured_key_store()).get(name)
+    valid = bool(item and item["enabled"] and secrets.compare_digest(item["sha256"], job["access_key_hash"]))
+    if not valid:
+        return False
+    return item["claimed_job"] == job["id"] if job["mode"] == "send" else not item["claimed_job"]
+
 
 
 def question_text(field):
@@ -1232,7 +1407,7 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <div class="access-brand"><span class="brand-mark"><svg class="icon"><use href="#i-form"/></svg></span><strong>KDautoform</strong></div>
 <div class="access-badge"><svg class="icon"><use href="#i-shield"/></svg>KÍCH HOẠT CÔNG CỤ</div>
 <h1 id="accessTitle">Nhập key để bắt đầu.</h1>
-<p class="access-description">Sử dụng key được cấp để mở công cụ điền form và cấu hình tỷ lệ của bạn.</p>
+<p class="access-description">Mỗi key dùng cho một đợt chạy. Bạn có thể đọc form, chỉnh tỷ lệ và điền thử trước khi bắt đầu.</p>
 <form id="accessForm">
 <label class="label" for="accessKey">Key sử dụng</label>
 <div class="access-input"><input id="accessKey" type="password" required maxlength="256" placeholder="KD-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" autocomplete="off" spellcheck="false" autocapitalize="characters" aria-describedby="accessHint accessError"><button type="button" id="toggleKey" aria-label="Hiện key" aria-pressed="false">Hiện</button></div>
@@ -1295,17 +1470,17 @@ const icon=name=>'<svg class="icon"><use href="#i-'+name+'"/></svg>';
 const escapeHTML=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const colors=["#bc2635","#d34e59","#e78186","#eeb0af","#f1cac5","#e7d9d3","#c98c95","#dcb1b5"];
 const kinds={single:"Chọn một",dropdown:"Danh sách",multiple:"Chọn nhiều",scale:"Chấm điểm",grid:"Bảng đánh giá",grid_multiple:"Bảng chọn nhiều",text:"Trả lời ngắn",paragraph:"Tự luận",date:"Ngày tháng",time:"Thời gian"};
-const state={schema:null,config:{},scanId:null,scanToken:0,scanning:false,job:null,armed:false,autoTimer:null,remaining:0,pollTimer:null,forceCheck:false,undo:[]};
+const state={schema:null,config:{},scanId:null,scanToken:0,scanning:false,job:null,armed:false,autoTimer:null,remaining:0,pollTimer:null,forceCheck:false,keyUsed:false,undo:[]};
 const emptyMarkup=$("questionList").innerHTML;
 let urlTimer=null,toastTimer=null;
 function toast(message){$("toast").textContent=message;$("toast").hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$("toast").hidden=true,4200)}
-async function api(path,data){const response=await fetch(path,{method:data?"POST":"GET",headers:data?{"Content-Type":"application/json","X-Local-Token":TOKEN}:{},body:data?JSON.stringify(data):undefined});let result;try{result=await response.json()}catch{throw Error("Máy chủ chưa trả về dữ liệu. Kiểm tra cửa sổ Python.")}if(!response.ok){if(response.status===401&&!path.startsWith("/api/auth/"))lockAccess(result.error);throw Error(result.error||"Không thực hiện được thao tác.")}return result}
+async function api(path,data){const response=await fetch(path,{method:data?"POST":"GET",headers:data?{"Content-Type":"application/json","X-Local-Token":TOKEN}:{},body:data?JSON.stringify(data):undefined});let result;try{result=await response.json()}catch{throw Error("Máy chủ chưa trả về dữ liệu. Kiểm tra cửa sổ Python.")}if(!response.ok){if(result.key_used){state.keyUsed=true;cancelCountdown()}if(response.status===401&&!path.startsWith("/api/auth/"))lockAccess(result.error);throw Error(result.error||"Không thực hiện được thao tác.")}return result}
 function activeJob(){return state.job&&["queued","running","stopping"].includes(state.job.status)}
 function validLink(value){return /^https:\/\/(?:docs\.google\.com\/forms\/|forms\.gle\/|forms\.google\.com\/)/i.test(value)}
 function status(text,kind=""){const node=$("scanStatus");node.className="scan-status "+kind;node.innerHTML=(kind==="loading"?'<span class="spinner"></span>':icon(kind==="success"?"check":kind==="error"?"alert":"shield"))+"<span>"+escapeHTML(text)+"</span>"}
 function quantity(){const raw=$("quantity").value.trim();if(raw==="")return null;const value=Number(raw);return Number.isInteger(value)&&value>=0?value:null}
 function fieldValid(field){const entry=state.config[field.id];if(!entry)return false;if(field.options.length){const values=field.options.map(option=>Number(entry.rates[option]));if(values.some(value=>!Number.isFinite(value)||value<0||value>100))return false;const sum=values.reduce((a,b)=>a+b,0);return ["multiple","grid_multiple"].includes(field.kind)?sum>=field.minimum*100-.001&&sum<=field.maximum*100+.001:Math.abs(sum-100)<.001}return entry.mode!=="fixed"||Boolean(entry.value.trim())}
-function ready(){return Boolean(state.schema)&&!state.scanning&&quantity()!==null&&state.schema.fields.every(fieldValid)}
+function ready(){return !state.keyUsed&&Boolean(state.schema)&&!state.scanning&&quantity()!==null&&state.schema.fields.every(fieldValid)}
 function apportion(weights,total=100){const sum=weights.reduce((a,b)=>a+b,0);if(!sum)return weights.map((_,i)=>i===0?total:0);const ideal=weights.map(v=>v/sum*total),values=ideal.map(Math.floor);const order=values.map((_,i)=>i).sort((a,b)=>(ideal[b]-values[b])-(ideal[a]-values[a]));const left=total-values.reduce((a,b)=>a+b,0);for(let i=0;i<left;i++)values[order[i]]++;return values}
 function fold(value){return String(value).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/đ/g,"d")}
 function randomRates(field){let weights=field.options.map(()=>.8+Math.random()*.5);const labels=field.options.map(fold);const scores=labels.map(label=>label.includes("khong dong y")?label.includes("hoan toan")?1:2:label.includes("dong y")?label.includes("hoan toan")?5:4:label.includes("binh thuong")||label.includes("trung lap")?3:0);if(scores.length===5&&scores.slice().sort().join()==="1,2,3,4,5")weights=scores.map(score=>[12,17,25,28,18][score-1]+Math.random()*6-3);else if(field.kind==="scale"&&field.options.length>=3)weights=field.options.map((_,i)=>Math.exp(-.5*Math.pow((i/(field.options.length-1)-.62)/.30,2))*(.9+Math.random()*.2));else if(labels.some(v=>/^(co|yes)\b/.test(v))&&labels.some(v=>/^(khong|no)\b/.test(v)))weights=labels.map(v=>/^(co|yes)\b/.test(v)?1.5+Math.random()*.2:1);if(["multiple","grid_multiple"].includes(field.kind)){const low=field.minimum*100,high=field.maximum*100;const total=Math.min(high,Math.max(low,140+Math.floor(Math.random()*100)));const values=weights.map(()=>0);for(let n=0;n<total;n++){const available=weights.map((_,i)=>i).filter(i=>values[i]<100);const sum=available.reduce((a,i)=>a+weights[i],0);let point=Math.random()*sum,chosen=available[available.length-1];for(const i of available){point-=weights[i];if(point<=0){chosen=i;break}}values[chosen]++}return values}return apportion(weights)}
@@ -1316,9 +1491,9 @@ return '<article class="panel question-card" id="'+cardId(field)+'" data-field="
 function updateCard(field){const card=$(cardId(field));if(!card)return;const valid=fieldValid(field);card.classList.toggle("invalid",!valid);if(!field.options.length)return;const rates=field.options.map(option=>Number(state.config[field.id].rates[option]));const total=rates.reduce((a,b)=>a+b,0);field.options.forEach((option,i)=>{const segment=card.querySelector('[data-segment="'+i+'"]');segment.style.width=(total?Math.max(0,rates[i])/total*100:0)+"%"});const sum=card.querySelector(".sum");sum.innerHTML=(valid?icon("check"):icon("alert"))+(Number.isFinite(total)?Number(total.toFixed(2)):"—")+"%";const multi=["multiple","grid_multiple"].includes(field.kind);card.querySelector(".normalize-one").hidden=multi;sum.title=multi?"Tổng tỷ lệ có thể vượt 100% do được chọn nhiều đáp án":"Tổng tỷ lệ phải bằng 100%"}
 function renderQuestions(){if(!state.schema){$("questionList").innerHTML=emptyMarkup;return}$("questionList").innerHTML=state.schema.fields.map(buildCard).join("");state.schema.fields.forEach(updateCard);$("fieldCount").textContent=state.schema.question_count+" câu hỏi";$("formMeta").hidden=false;$("formMeta").innerHTML="<strong>"+escapeHTML(state.schema.title)+"</strong><small>"+state.schema.pages.length+" trang · "+state.schema.fields.length+" mục trả lời · "+(state.schema.branching?"Có phân nhánh":"Tự điền đủ toàn bộ trang")+"</small>";$("toolbar").hidden=false;$("pageFilter").innerHTML='<option value="">Mọi trang</option>'+state.schema.pages.map(page=>'<option value="'+page.index+'">Trang '+(page.index+1)+'</option>').join("");filterQuestions();renderSummary()}
 function filterQuestions(){if(!state.schema)return;const term=fold($("searchQuestions").value),page=$("pageFilter").value;let count=0;for(const field of state.schema.fields){const visible=(!term||fold(field.question+" "+(field.row||"")).includes(term))&&(page===""||String(field.page)===page);const card=$(cardId(field));if(card){card.hidden=!visible;if(visible)count++}}let empty=$("noResults");if(!count&&!empty){empty=document.createElement("div");empty.id="noResults";empty.className="no-results";empty.textContent="Không có câu hỏi phù hợp."; $("questionList").append(empty)}else if(count&&empty)empty.remove()}
-function renderSummary(){const count=quantity(),isActive=activeJob();$("summaryCount").innerHTML=(count===0?"∞":count===null?"—":count.toLocaleString("vi-VN"))+"<small>lượt điền</small>";$("summaryQuestions").textContent=state.schema?state.schema.question_count+" câu · "+state.schema.pages.length+" trang":"Chưa kết nối";const valid=state.schema?state.schema.fields.filter(fieldValid).length:0,total=state.schema?.fields.length||0;$("summaryValid").textContent=total?valid+"/"+total+" mục":"—";$("summaryValid").className=total?(valid===total?"good":"bad"):"";$("summaryMode").textContent=state.schema?(count>0&&!state.schema.branching&&!state.schema.fields.some(f=>f.exclusive_columns)?"Theo số lượt":"Theo xác suất"):"Theo mong muốn";const button=$("startButton");button.classList.toggle("stop",Boolean(isActive));button.disabled=isActive?state.job.status==="stopping":!ready();button.innerHTML=icon(isActive?"stop":"play")+"<span>"+(isActive?(state.job.status==="stopping"?"Đang dừng...":"Dừng lượt chạy"):state.remaining>0?"Bắt đầu ngay":state.schema?"Bắt đầu điền form":"Dán link để bắt đầu")+"</span>";$("testButton").disabled=!ready()||isActive;$("randomAll").disabled=!state.schema||isActive;$("balanceAll").disabled=!state.schema||isActive;$("undoRates").disabled=!state.undo.length||isActive;$("formUrl").disabled=Boolean(isActive);$("quantity").disabled=Boolean(isActive);$("minusCount").disabled=Boolean(isActive);$("plusCount").disabled=Boolean(isActive);$("scanAgain").disabled=Boolean(isActive)||state.scanning;document.querySelectorAll(".question-card input,.question-card select,.question-card textarea,.question-card button").forEach(el=>el.disabled=Boolean(isActive))}
+function renderSummary(){const count=quantity(),isActive=activeJob();$("summaryCount").innerHTML=(count===0?"∞":count===null?"—":count.toLocaleString("vi-VN"))+"<small>lượt điền</small>";$("summaryQuestions").textContent=state.schema?state.schema.question_count+" câu · "+state.schema.pages.length+" trang":"Chưa kết nối";const valid=state.schema?state.schema.fields.filter(fieldValid).length:0,total=state.schema?.fields.length||0;$("summaryValid").textContent=total?valid+"/"+total+" mục":"—";$("summaryValid").className=total?(valid===total?"good":"bad"):"";$("summaryMode").textContent=state.schema?(count>0&&!state.schema.branching&&!state.schema.fields.some(f=>f.exclusive_columns)?"Theo số lượt":"Theo xác suất"):"Theo mong muốn";const button=$("startButton");button.classList.toggle("stop",Boolean(isActive));button.disabled=isActive?state.job.status==="stopping":!ready();button.innerHTML=icon(isActive?"stop":"play")+"<span>"+(isActive?(state.job.status==="stopping"?"Đang dừng...":"Dừng lượt chạy"):state.remaining>0?"Bắt đầu ngay":state.schema?"Bắt đầu điền form":"Dán link để bắt đầu")+"</span>";$("testButton").disabled=!ready()||isActive;$("randomAll").disabled=!state.schema||isActive;$("balanceAll").disabled=!state.schema||isActive;$("undoRates").disabled=!state.undo.length||isActive;$("formUrl").disabled=Boolean(isActive);$("quantity").disabled=Boolean(isActive);$("minusCount").disabled=Boolean(isActive);$("plusCount").disabled=Boolean(isActive);$("scanAgain").disabled=Boolean(isActive)||state.scanning;document.querySelectorAll(".question-card input,.question-card select,.question-card textarea,.question-card button").forEach(el=>el.disabled=Boolean(isActive));if(state.keyUsed&&!isActive){button.disabled=false;button.innerHTML=icon("shield")+"<span>Nhập key mới</span>";$("testButton").disabled=true;$("scanAgain").disabled=true}}
 function cancelCountdown(){clearInterval(state.autoTimer);state.autoTimer=null;state.remaining=0;$("countdown").hidden=true;renderSummary()}
-function scheduleAuto(){persistDraft();cancelCountdown();if(!state.armed||!$("autoRun").checked||!ready()||activeJob())return;state.remaining=12;$("countdown").hidden=false;function paint(){$("countdown").innerHTML="Tự bắt đầu sau <strong>"+state.remaining+" giây</strong>. Chỉnh tỷ lệ để đặt lại thời gian. <button type='button' id='pauseAuto'>Tạm dừng</button>";renderSummary()}paint();state.autoTimer=setInterval(()=>{state.remaining--;if(state.remaining<=0){cancelCountdown();startJob(false).catch(error=>toast(error.message))}else paint()},1000)}
+function scheduleAuto(){persistDraft();cancelCountdown();if(state.keyUsed||!state.armed||!$("autoRun").checked||!ready()||activeJob())return;state.remaining=12;$("countdown").hidden=false;function paint(){$("countdown").innerHTML="Tự bắt đầu sau <strong>"+state.remaining+" giây</strong>. Chỉnh tỷ lệ để đặt lại thời gian. <button type='button' id='pauseAuto'>Tạm dừng</button>";renderSummary()}paint();state.autoTimer=setInterval(()=>{state.remaining--;if(state.remaining<=0){cancelCountdown();startJob(false).catch(error=>toast(error.message))}else paint()},1000)}
 function rememberRates(){state.undo.push(JSON.stringify(state.config));if(state.undo.length>25)state.undo.shift();$("undoRates").disabled=false}
 function persistDraft(){if(state.scanId)localStorage.setItem("formpilot.draft",JSON.stringify({scanId:state.scanId,config:state.config}))}
 function undoRates(){if(!state.undo.length||activeJob())return;state.config=JSON.parse(state.undo.pop());renderQuestions();$("undoRates").disabled=!state.undo.length;persistDraft();scheduleAuto();toast("Đã hoàn tác thay đổi tỷ lệ.")}
@@ -1327,9 +1502,9 @@ function refreshCard(field){const old=$(cardId(field));if(old){old.outerHTML=bui
 function normalizeField(field,balanced=false){if(!field.options.length)return;if(["multiple","grid_multiple"].includes(field.kind)){if(balanced){const target=Math.min(field.maximum*100,Math.max(field.minimum*100,180));let values=apportion(field.options.map(()=>1),target);state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}return}const values=apportion(field.options.map(option=>balanced?1:Math.max(0,Number(state.config[field.id].rates[option])||0)));state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}
 async function scanForm(){const url=$("formUrl").value.trim();cancelCountdown();if(activeJob())return;if(!validLink(url)){status(url?"Vui lòng nhập link Google Form hợp lệ.":"Hỗ trợ Google Forms công khai và link forms.gle",url?"error":"");return}const token=++state.scanToken;state.scanning=true;state.armed=true;state.schema=null;state.config={};$("formMeta").hidden=true;$("toolbar").hidden=true;$("fieldCount").textContent="Đang đọc...";$("questionList").innerHTML='<div class="loading-skeleton" aria-label="Đang đọc câu hỏi"></div>';status("Đang đọc câu hỏi và tất cả các trang...","loading");renderSummary();try{const result=await api("/api/scan",{url});if(token!==state.scanToken)return;state.scanId=result.scan_id;const poll=async()=>{if(token!==state.scanToken)return;try{const value=await api("/api/scans/"+state.scanId);if(token!==state.scanToken)return;if(value.status==="scanning"){setTimeout(poll,650);return}if(value.status==="error")throw Error(value.error);state.schema=value.schema;state.config=value.config;state.undo=[];$("undoRates").disabled=true;state.scanning=false;localStorage.setItem("formpilot.scan",state.scanId);localStorage.setItem("formpilot.url",url);renderQuestions();status("Đã đọc "+value.schema.question_count+" câu hỏi qua "+value.schema.pages.length+" trang.","success");scheduleAuto()}catch(error){if(token===state.scanToken)scanError(error)}};poll()}catch(error){if(token===state.scanToken)scanError(error)}}
 function scanError(error){state.scanning=false;state.schema=null;state.config={};state.armed=false;status(error.message,"error");$("fieldCount").textContent="0 câu hỏi";$("questionList").innerHTML=emptyMarkup;renderSummary();toast(error.message)}
-async function startJob(checkOnly){cancelCountdown();if(!ready()||activeJob())return;state.armed=false;try{const result=await api("/api/jobs",{scan_id:state.scanId,count:quantity(),config:state.config,delay:2,headless:!$("showBrowser").checked,mode:checkOnly?"check":"send"});localStorage.setItem("formpilot.job",result.job_id);state.job={id:result.job_id,status:"queued",processed:0,total:checkOnly?1:quantity(),events:[]};renderJob();pollJob()}catch(error){toast(error.message);renderSummary()}}
+async function startJob(checkOnly){cancelCountdown();if(!ready()||activeJob())return;state.armed=false;try{const result=await api("/api/jobs",{scan_id:state.scanId,count:quantity(),config:state.config,delay:2,headless:!$("showBrowser").checked,mode:checkOnly?"check":"send"});localStorage.setItem("formpilot.job",result.job_id);state.keyUsed=Boolean(result.key_used);state.job={id:result.job_id,mode:result.mode,status:"queued",processed:0,total:result.mode==="check"?1:quantity(),events:[]};renderJob();pollJob()}catch(error){toast(error.message);renderSummary()}}
 async function pollJob(){if(!state.job)return;try{const value=await api("/api/jobs/"+state.job.id);state.job=value;renderJob();if(activeJob())state.pollTimer=setTimeout(pollJob,1000)}catch(error){toast(error.message);clearTimeout(state.pollTimer)}}
-function renderJob(){const job=state.job;if(!job)return;$("jobPanel").hidden=false;const labels={queued:"ĐANG CHUẨN BỊ",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+job.status;$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Google đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng. Bạn có thể thiết lập một lượt mới.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";renderSummary()}
+function renderJob(){const job=state.job;if(!job)return;if(job.mode==="send")state.keyUsed=true;$("jobPanel").hidden=false;const labels={queued:"ĐANG CHUẨN BỊ",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+job.status;$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Google đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";renderSummary()}
 $("formUrl").addEventListener("input",()=>{clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.armed=false;if(validLink($("formUrl").value.trim()))urlTimer=setTimeout(scanForm,850);else{state.schema=null;state.config={};state.scanning=false;$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link Google Form để bắt đầu.");renderSummary()}});
 $("scanAgain").addEventListener("click",scanForm);
 $("quantity").addEventListener("input",()=>{localStorage.setItem("formpilot.count",$("quantity").value);renderSummary();scheduleAuto()});
@@ -1346,10 +1521,10 @@ $("countdown").addEventListener("click",event=>{if(event.target.closest("#pauseA
 $("undoRates").addEventListener("click",undoRates);document.addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"&&!event.target.matches("input,textarea,select")){event.preventDefault();undoRates()}});
 $("searchQuestions").addEventListener("input",filterQuestions);$("pageFilter").addEventListener("change",filterQuestions);
 $("testButton").addEventListener("click",()=>startJob(true));
-$("startButton").addEventListener("click",async()=>{if(activeJob()){try{state.job=await api("/api/jobs/"+state.job.id+"/stop",{});renderJob()}catch(error){toast(error.message)}}else startJob(false)});
-async function init(){const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";try{const info=await api("/api/state");state.forceCheck=info.force_check;$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ Python.","error")}renderSummary()}
+$("startButton").addEventListener("click",async()=>{if(activeJob()){try{state.job=await api("/api/jobs/"+state.job.id+"/stop",{});renderJob()}catch(error){toast(error.message)}}else if(state.keyUsed){$("logoutKey").click()}else startJob(false)});
+async function init(){const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";try{const info=await api("/api/state");state.forceCheck=info.force_check;state.keyUsed=Boolean(info.key_used);$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ Python.","error")}renderSummary()}
 function lockAccess(message=""){
-clearInterval(state.autoTimer);clearTimeout(state.pollTimer);state.autoTimer=null;state.remaining=0;state.armed=false;state.job=null;state.schema=null;state.config={};state.scanId=null;
+clearInterval(state.autoTimer);clearTimeout(state.pollTimer);state.autoTimer=null;state.remaining=0;state.armed=false;state.keyUsed=false;state.job=null;state.schema=null;state.config={};state.scanId=null;
 $("workspaceApp").hidden=true;$("workspaceApp").inert=true;$("accessGate").hidden=false;document.body.classList.add("access-locked");
 $("questionList").innerHTML=emptyMarkup;$("formMeta").hidden=true;$("toolbar").hidden=true;$("jobPanel").hidden=true;$("fieldCount").textContent="0 câu hỏi";
 $("accessError").textContent=message;setTimeout(()=>$("accessKey").focus(),50);
@@ -1574,8 +1749,9 @@ class WebStopRequested(Exception):
 
 
 class WebApplication:
-    def __init__(self, force_check=False, headless_only=False):
+    def __init__(self, force_check=False, headless_only=False, key_store=None):
         import threading
+        self.key_store = key_store or configured_key_store()
         self.headless_only = headless_only
         self.lock = threading.RLock()
         self.scans, self.jobs = {}, {}
@@ -1657,17 +1833,45 @@ class WebApplication:
                 raise FormError("Máy chủ đang đọc form. Vui lòng chờ đọc xong rồi bắt đầu.")
             if any(item["status"] in ("queued", "running", "stopping") for item in self.jobs.values()):
                 raise FormError("Một lượt chạy đang hoạt động. Hãy dừng hoặc chờ hoàn tất.")
+            if not job["access_key_id"]:
+                raise FormError("Vui lòng nhập key hợp lệ trước khi bắt đầu.")
+            if mode == "send":
+                self.key_store.claim(job["access_key_id"], job["access_key_hash"], job_id)
+            else:
+                item = self.key_store.get(job["access_key_id"])
+                if not item or item["claimed_job"]:
+                    raise KeyAlreadyUsed("Key đã dùng. Vui lòng nhập key mới.")
             self.jobs[job_id] = job
             self.scans[state["id"]]["config"] = config
-        threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
-        return {"job_id": job_id, "mode": mode}
+        try:
+            threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
+        except RuntimeError as exc:
+            job.update(status="error", error="Không khởi động được đợt chạy.")
+            if mode == "send":
+                self.key_store.finish(job["access_key_id"], job["access_key_hash"], job_id, "error")
+            raise FormError("Không khởi động được đợt chạy. Key đã được giữ cho đợt này; hãy cấp key mới.") from exc
+        return {"job_id": job_id, "mode": mode, "key_used": mode == "send"}
 
     def run_job(self, job):
+        try:
+            self._run_job(job)
+        except Exception as exc:
+            with self.lock:
+                job.update(status="error", error=str(exc), current_question="")
+            self.event(job, str(exc), "error")
+        finally:
+            if job["mode"] == "send":
+                try:
+                    self.key_store.finish(job["access_key_id"], job["access_key_hash"], job["id"], job["status"])
+                except FormError:
+                    self.event(job, "Chưa cập nhật được kết quả vào kho key. Key vẫn đã được ghi nhận sử dụng.", "warning")
+
+    def _run_job(self, job):
         schema, stop = job["schema"], job["stop_event"]
         app = self
         class ProgressBrowser(FormBrowser):
             def fill_field(self, field, value):
-                if stop.is_set() or not active_job_key(job):
+                if stop.is_set() or not active_job_key(job, app.key_store):
                     raise WebStopRequested()
                 with app.lock:
                     changed = job["current_page"] != field["page"] + 1
@@ -1691,7 +1895,7 @@ class WebApplication:
                 for index in itertools.count(1):
                     if job["total"] and index > job["total"]:
                         break
-                    if stop.is_set() or not active_job_key(job):
+                    if stop.is_set() or not active_job_key(job, app.key_store):
                         raise WebStopRequested()
                     if index > 1 and stop.wait(job["delay"]):
                         raise WebStopRequested()
@@ -1701,7 +1905,7 @@ class WebApplication:
                     answers = sampler.sample(index)
                     browser.profile = sampler.last_profile
                     report = browser.prepare(schema, answers)
-                    if stop.is_set() or not active_job_key(job):
+                    if stop.is_set() or not active_job_key(job, app.key_store):
                         raise WebStopRequested()
                     log.write({"event": "filled", "index": index, "report": report,
                                "answers": answers, "profile": sampler.last_profile})
@@ -1778,17 +1982,16 @@ def web_settings(port=None, host=None):
         origins.add(value)
     if cloud and not origins:
         raise FormError("Thiếu URL công khai. Trên Render dùng RENDER_EXTERNAL_URL tự cấp; nơi khác đặt KD_PUBLIC_URL.")
-    if cloud and not any(item["enabled"] for item in live_settings()["keys"].values()):
-        raise FormError("Cần ít nhất một key đang bật trước khi triển khai.")
     return {"cloud": cloud, "host": host, "port": port, "public_url": public_url,
             "origins": origins, "secure_cookie": bool(origins) and all(value.startswith("https://") for value in origins)}
 
 
-def create_web_server(port=None, force_check=False, host=None):
+def create_web_server(port=None, force_check=False, host=None, key_store=None):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     settings = web_settings(port, host)
-    app = WebApplication(force_check=force_check, headless_only=settings["cloud"])
-    access = AccessSessions()
+    key_store = key_store or configured_key_store()
+    app = WebApplication(force_check=force_check, headless_only=settings["cloud"], key_store=key_store)
+    access = AccessSessions(key_store)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -1834,13 +2037,14 @@ def create_web_server(port=None, force_check=False, host=None):
                 if path == "/api/auth/status":
                     session = access.current(self.headers.get("Cookie"))
                     self.reply(200, {"authenticated": bool(session),
-                                     "key_name": session["key_id"] if session else None})
+                                     "key_name": session["key_id"] if session else None,
+                                     "key_used": session["key_used"] if session else False})
                     return
                 session = self.require_access()
                 if session is None:
                     return
                 if path == "/api/state":
-                    self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only, "version": "3.1", "name": "KDautoform"})
+                    self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only, "version": "4.0", "name": "KDautoform", "key_used": session["key_used"]})
                 elif path.startswith("/api/scans/"):
                     scan_id = path.rsplit("/", 1)[-1]
                     self.require_owner("scan", scan_id, session)
@@ -1899,7 +2103,7 @@ def create_web_server(port=None, force_check=False, host=None):
                         self.reply(200, {"authenticated": True, "key_name": record["key_id"]},
                                    headers={"Set-Cookie": self.access_cookie(token, 43200)})
                     else:
-                        self.reply(401, {"error": "Key không đúng hoặc đã bị khóa. Vui lòng kiểm tra lại."})
+                        self.reply(401, {"error": "Key không đúng, đã bị khóa hoặc đã dùng cho một đợt chạy. Vui lòng dùng key mới."})
                     return
                 if path == "/api/auth/logout":
                     access.logout(self.headers.get("Cookie"))
@@ -1910,6 +2114,8 @@ def create_web_server(port=None, force_check=False, host=None):
                 if session is None:
                     return
                 if path == "/api/scan":
+                    if session["key_used"]:
+                        raise KeyAlreadyUsed("Key đã dùng. Vui lòng nhập key mới để đọc và chạy form khác.")
                     result = app.scan(str(payload.get("url", "")))
                     with app.lock:
                         app.scans[result["scan_id"]]["access_key_id"] = session["key_id"]
@@ -1925,6 +2131,8 @@ def create_web_server(port=None, force_check=False, host=None):
                     self.reply(200, app.stop_job(job_id))
                 else:
                     self.reply(404, {"error": "Không tìm thấy thao tác."})
+            except KeyAlreadyUsed as exc:
+                self.reply(409, {"error": str(exc), "key_used": True})
             except (FormError, ValueError, TypeError, KeyError) as exc:
                 self.reply(400, {"error": str(exc)})
             except (BrokenPipeError, ConnectionResetError):
@@ -1969,6 +2177,7 @@ def start_web(port=None, open_browser=True, force_check=False, host=None):
 UX_PRINCIPLES = [['Phân cấp thị giác', 'Tiêu đề, số lượng, tỷ lệ và nút bắt đầu có cấp độ rõ ràng.'], ['Tính nhất quán', 'Dùng chung bảng màu đỏ, kiểu nút và cách trình bày câu hỏi.'], ['Căn chỉnh', 'Các trường nhập, nhãn và thẻ câu hỏi cùng một trục.'], ['Nhịp điệu khoảng cách', 'Khoảng cách được lặp lại giữa các nhóm thông tin.'], ['Nguyên lý gần nhau', 'Đáp án, thanh kéo và ô phần trăm nằm cùng một hàng.'], ['Khoảng trắng', 'Tách rõ thiết lập, câu hỏi, tóm tắt và liên hệ.'], ['Tương phản dễ đọc', 'Làm đậm chữ chức năng để giữ tương phản trên nền sáng.'], ['Thiết kế đáp ứng', 'Bố cục đổi thành một cột trên điện thoại.'], ['Định luật Fitts', 'Nút chính lớn, vùng chạm trên điện thoại được mở rộng.'], ['Định luật Hick', 'Chỉ giữ một hành động chính theo trạng thái hiện tại.'], ['Ngăn ngừa lỗi', 'Chặn chạy khi thiếu link, sai số lượng hoặc tỷ lệ chưa hợp lệ.'], ['Báo lỗi tại chỗ', 'Hiển thị tổng phần trăm và đánh dấu ngay câu chưa hợp lệ.'], ['Hiển thị trạng thái hệ thống', 'Có trạng thái đọc form, đếm ngược, trang đang điền và kết quả.'], ['Phản hồi ngay', 'Đổi tỷ lệ là cập nhật thanh phân bổ và tóm tắt tức thì.'], ['Quyền kiểm soát của người dùng', 'Cho tạm dừng tự chạy, dừng lượt đang chạy và chọn điền thử.'], ['Khả năng hoàn tác', 'Hoàn tác được thao tác ngẫu nhiên, cân bằng và sửa tỷ lệ.'], ['Nhận biết thay vì ghi nhớ', 'Hiển thị câu hỏi và đáp án thật, không buộc nhớ mã trường.'], ['Ngôn ngữ quen thuộc', 'Dùng nhãn tiếng Việt, phần trăm và số lượt dễ hiểu.'], ['Tiết lộ dần', 'Chỉ mở ô nội dung tự nhập khi chọn chế độ tương ứng.'], ['Thao tác trực tiếp', 'Có cả thanh kéo và ô số cho từng tỷ lệ.'], ['Khả năng tiếp cận', 'Có nhãn, đường dẫn bỏ qua, trạng thái live và focus bàn phím.'], ['Tôn trọng giảm chuyển động', 'Tắt hiệu ứng khi hệ thống yêu cầu giảm chuyển động.'], ['Giữ ngữ cảnh làm việc', 'Lưu link, số lượng, cấu hình đang sửa và lượt chạy hiện tại.'], ['Tìm kiếm và lọc', 'Tìm câu hỏi và lọc theo trang khi biểu mẫu dài.'], ['Xác nhận theo kết quả thật', 'Chỉ ghi nhận lượt gửi sau khi Google xác nhận lưu phản hồi.']]
 
 def cli(argv=None):
+    load_local_key_environment()
     parser = argparse.ArgumentParser(
         description="Tự điền Google Form công khai bằng dữ liệu giả để kiểm thử. Chỉ sửa FORM_URL.",
         epilog="--count 0 chạy đến Ctrl+C. --check điền đến trang cuối nhưng không gửi. "
@@ -1980,7 +2189,9 @@ def cli(argv=None):
     parser.add_argument("--no-open", action="store_true", help="Không tự mở giao diện")
     parser.add_argument("--ux-report", action="store_true", help="Xem các nguyên lý UI/UX đã áp dụng")
     key_commands = parser.add_mutually_exclusive_group()
-    key_commands.add_argument("--key-list", action="store_true", help="Xem danh sách tên key và trạng thái")
+    key_commands.add_argument("--key-list", action="store_true", help="Xem danh sách key và trạng thái 0/1 hoặc 1/1")
+    key_commands.add_argument("--key-generate", type=int, nargs="?", const=1, metavar="SO_LUONG", help="Tạo key ngẫu nhiên và lưu CSV; mặc định 1")
+    key_commands.add_argument("--key-paths", action="store_true", help="Xem vị trí kho key và thư mục CSV riêng tư")
     key_commands.add_argument("--key-add", metavar="TEN", help="Tạo và lưu key mới")
     key_commands.add_argument("--key-rotate", metavar="TEN", help="Đổi mã của một key")
     key_commands.add_argument("--key-delete", metavar="TEN", help="Xóa một key")
@@ -1997,7 +2208,7 @@ def cli(argv=None):
     parser.add_argument("--log", type=Path, help="Đường dẫn nhật ký; mặc định lưu ngoài thư mục mã nguồn")
     parser.add_argument("--setup", action="store_true", help="Cài Playwright và Chromium, rồi thoát")
     args = parser.parse_args(argv)
-    if any(getattr(args, name) for name in ("key_list", "key_add", "key_rotate", "key_delete", "key_disable", "key_enable")):
+    if args.key_generate is not None or args.key_paths or any(getattr(args, name) for name in ("key_list", "key_add", "key_rotate", "key_delete", "key_disable", "key_enable")):
         try:
             return manage_access_keys(args)
         except (FormError, OSError, ValueError) as exc:

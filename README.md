@@ -10,7 +10,7 @@ python google_form_tool.py --setup
 python google_form_tool.py --web
 ```
 
-Mở http://127.0.0.1:8765 và nhập key hiện có. Dùng `--web --check` để kiểm tra mọi trang mà chưa gửi phản hồi.
+Tạo key bằng `python google_form_tool.py --key-generate`, sau đó mở http://127.0.0.1:8765 và nhập mã được cấp. Dùng `--web --check` để kiểm tra mọi trang mà chưa gửi phản hồi.
 
 ## Đưa lên GitHub
 
@@ -19,7 +19,7 @@ Repository đã có remote `origin` và nhánh `main`:
 ```powershell
 cd C:\Users\DELL\Desktop\toolggform
 git status --short
-git add .gitignore .dockerignore Dockerfile requirements.txt render.yaml README.md google_form_tool.py tests/test_deployment.py
+git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py tests/test_deployment.py tests/test_keys.py
 git commit -m "Prepare KDautoform for Render Docker deployment"
 git push origin main
 ```
@@ -30,13 +30,13 @@ Nếu Git báo `rejected (fetch first)`, chạy `git pull --rebase origin main` 
 
 ## Triển khai miễn phí trên Render
 
-Cách khuyến nghị: dùng Blueprint để Render đọc sẵn `render.yaml`.
+Trước khi deploy, cấu hình kho PostgreSQL theo mục **Kho key bền vững cho Render** bên dưới. Cách khuyến nghị: dùng Blueprint để Render đọc sẵn `render.yaml`.
 
 1. Truy cập https://dashboard.render.com và đăng nhập bằng GitHub.
 2. Chọn **New > Blueprint**, kết nối repository **KDFillForm**. Nếu chưa thấy repo, cấp quyền cho Render truy cập repo đó trong phần cài đặt GitHub của Render.
 3. Chọn nhánh **main**, file Blueprint **render.yaml** ở thư mục gốc. Đặt tên Blueprint, ví dụ **KDautoform**.
 4. Xem lại service **kdautoform**, runtime **Docker**, compute plan **Free**. Chỉ tiếp tục khi màn hình thể hiện gói miễn phí; không thêm database hoặc dịch vụ trả phí.
-5. Chọn **Deploy Blueprint** hoặc **Apply** theo giao diện hiện tại. Render cài Python, Playwright, Chromium và các thư viện Linux từ Dockerfile.
+5. Nhập chuỗi PostgreSQL vào ô **KD_DATABASE_URL**, rồi chọn **Deploy Blueprint** hoặc **Apply** theo giao diện hiện tại. Render cài Python, Playwright, Chromium và các thư viện Linux từ Dockerfile.
 6. Khi service chuyển **Live**, mở URL `https://<ten-service>.onrender.com` được Render cấp. URL có thể có hậu tố để tránh trùng tên.
 7. Mở `https://<ten-service>.onrender.com/healthz`: phải thấy JSON có `"ok": true`.
 8. Vào trang chính, nhập key hiện có. Lần đầu thử hãy tắt **Tự chạy sau khi đọc form**, dùng form thử nghiệm của bạn và bấm **Điền thử** để kiểm tra đầy đủ các trang trước khi gửi thật.
@@ -81,30 +81,167 @@ Thay địa chỉ ví dụ bằng địa chỉ thật; không thêm `/api` hoặ
 
 Không cần đặt key người dùng vào biến môi trường. Source chỉ lưu mã băm SHA-256 của key; giữ riêng chuỗi key dùng đăng nhập.
 
-## Thêm, khóa, đổi và xóa key
+## Key dùng cho một đợt chạy
 
-Chạy trên máy Windows trong thư mục dự án:
+**Một key = một đợt chạy**, ví dụ một đợt có 100 lượt điền, không phải một phản hồi Google Form.
+
+- Đăng nhập, đọc form, chỉnh tỷ lệ và **Điền thử** chưa tiêu thụ key.
+- Bắt đầu **gửi thật**: key được ghi nhận cho đúng đợt đó trong CSDL. Hai trình duyệt hoặc hai máy chủ không thể mở hai đợt bằng một key.
+- Hoàn tất, dừng, lỗi hoặc restart giữa đợt đều không hoàn lại key; cần cấp mã mới.
+- Phiên hiện tại vẫn xem kết quả và tải nhật ký được sau khi key đã dùng. Nút chính đổi thành **Nhập key mới**. Đăng nhập lại bằng key đã dùng bị từ chối.
+- Phiên đăng nhập tối đa 12 giờ. Đăng xuất trước khi chạy thật không làm mất lượt.
+- Mở khóa không xóa lịch sử đã dùng. Đổi key cấp mã khác và làm mã cũ hết hiệu lực.
+
+### 1. Tạo key trong Terminal
+
+Mở Terminal trong VS Code:
 
 ```powershell
-python google_form_tool.py --key-list
+cd C:\Users\DELL\Desktop\toolggform
+python google_form_tool.py --key-generate
+```
+
+Lệnh trên tự tạo và đặt tên **1 key**. Tạo 10 key:
+
+```powershell
+python google_form_tool.py --key-generate 10
+```
+
+Đặt tên riêng cho một key:
+
+```powershell
 python google_form_tool.py --key-add khach-04
+```
+
+Kết quả có dạng:
+
+```text
+Kho key: C:\...\data\access_keys.sqlite3
+Tên: key-...
+KEY: KD-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX
+Đã lưu bản key thật tại: C:\...\private_keys\keys_YYYYMMDD_HHMMSS_XXXXXXXX.csv
+```
+
+Dòng `KEY:` là mã đăng nhập. Tên khách và mã băm không phải key. Ví dụ trên chỉ minh họa; dùng key thật do lệnh tạo ra.
+
+### 2. Key ở đâu, comment nào trong code?
+
+| Vị trí | Nội dung và cách dùng |
+| --- | --- |
+| `private_keys/keys_*.csv` | **Key thật**, tên và ngày tạo. Mở file CSV được in ra bằng VS Code/Excel, sao chép cột `key` để cấp cho khách. |
+| `data/access_keys.sqlite3` | Mã băm SHA-256, trạng thái khóa, đợt đã dùng và thời gian. Đây là kho mặc định khi chạy local. |
+| PostgreSQL, bảng `kd_access_keys` | Cùng dữ liệu trạng thái, dùng chung cho cloud khi cấu hình `KD_DATABASE_URL`. |
+| `.env` | Kết nối CSDL và đường dẫn riêng của chủ công cụ. File được Git bỏ qua. |
+
+Trong `google_form_tool.py` tìm comment **KHO KEY**:
+
+```python
+# KHO KEY: đổi đường dẫn mặc định tại đây, hoặc đặt KD_KEY_DB_PATH / KD_KEY_EXPORT_DIR trong .env.
+# data/access_keys.sqlite3 lưu mã băm + trạng thái đã dùng; private_keys/*.csv chứa KEY THẬT để bạn cấp cho khách.
+KEY_DB_PATH = Path(__file__).resolve().parent / "data" / "access_keys.sqlite3"
+KEY_EXPORT_DIR = Path(__file__).resolve().parent / "private_keys"
+```
+
+Không cần sửa nếu dùng thư mục mặc định. Đổi đường dẫn mà không sửa code bằng `.env`:
+
+```text
+KD_KEY_DB_PATH=D:/KDautoform/data/access_keys.sqlite3
+KD_KEY_EXPORT_DIR=D:/KDautoform/private_keys
+```
+
+Comment **CHỈ DÙNG MỘT LẦN** ở hàm `KeyStore.claim` đánh dấu câu SQL giữ key cho một đợt.
+
+`LEGACY_ACCESS_KEYS` là mã băm ba key cũ, chỉ nhập một lần khi tạo kho SQLite local đầu tiên. Sửa mục đó không thêm/sửa key trong kho đang dùng. Từ nay dùng lệnh quản lý. PostgreSQL mới không tự nạp ba key cũ; hãy tạo key mới trong đúng kho cloud.
+
+`.gitignore` bỏ qua `data/`, `private_keys/`, `.env` và SQLite. `.dockerignore` chỉ cho phép source cần thiết vào image. Giữ CSV key thật ở máy bạn; không upload lên GitHub hoặc thư mục web công khai.
+
+### 3. Xem, khóa, mở, đổi và xóa key
+
+Chọn lệnh bạn cần, chạy riêng từng lệnh:
+
+```powershell
+python google_form_tool.py --key-paths
+python google_form_tool.py --key-list
 python google_form_tool.py --key-disable khach-04
 python google_form_tool.py --key-enable khach-04
 python google_form_tool.py --key-rotate khach-04
 python google_form_tool.py --key-delete khach-04
 ```
 
-Chọn lệnh bạn cần, không chạy liên tiếp toàn bộ ví dụ vì lệnh cuối sẽ xóa key vừa tạo. Lệnh tạo/đổi chỉ hiển thị key mới một lần; tự lưu key ở nơi riêng tư. Các lệnh sửa phần `ACCESS_KEYS` trong `google_form_tool.py`.
+- `--key-paths`: in kho đang dùng và thư mục CSV.
+- `--key-list`: `CHƯA DÙNG · 0/1` là còn lượt; `ĐÃ DÙNG · 1/1` là đã gắn một đợt; `KHÓA` là đang khóa.
+- `--key-disable`: khóa key; phiên/lượt chạy dừng ở lần kiểm tra quyền tiếp theo.
+- `--key-enable`: mở lại, không khôi phục lượt đã dùng.
+- `--key-rotate`: cấp mã mới cho cùng tên và lưu CSV mới; mã cũ, phiên cũ hết hiệu lực.
+- `--key-delete`: xóa key khỏi kho.
 
-Sau khi thay đổi key, cập nhật bản cloud:
+Các lệnh không chỉnh source và **không cần git push/redeploy**, miễn Terminal và web dùng cùng CSDL. Thư mục CSV giữ cả những mã đã cấp trước đây; dùng file mới nhất khi bạn đổi mã.
+
+### 4. Dùng trên website
+
+1. Tạo key bằng Terminal.
+2. Sao chép mã `KD-...` từ Terminal hoặc CSV.
+3. Mở KDautoform, nhập key.
+4. Dán link form được phép kiểm thử, chọn số lượt và tỷ lệ.
+5. Bấm **Điền thử** nếu cần; chưa mất key.
+6. Bắt đầu gửi thật: key gắn với đợt này. Hoàn tất thì tải nhật ký.
+7. Chạy đợt khác: bấm **Nhập key mới** rồi dùng key mới.
+
+Key không giới hạn sẵn số phản hồi. Số lượng `0` vẫn là một đợt liên tục đến khi dừng.
+
+## Kho key bền vững cho Render
+
+Render Free mất file local khi ngủ/restart/deploy. Bản cloud này yêu cầu **`KD_DATABASE_URL` trỏ tới PostgreSQL** để nhớ key đã dùng qua các lần khởi động. SQLite mặc định dành cho máy bạn.
+
+Dùng PostgreSQL sẵn có hoặc [Neon Free](https://neon.com/docs/introduction/plans). Đây là cấu hình CSDL của chủ công cụ; người dùng web không cần tài khoản.
+
+### 1. Lấy kết nối PostgreSQL
+
+1. Vào [Neon Console](https://console.neon.tech), tạo project với gói **Free**.
+2. Chọn khu vực gần Render nếu có, giữ database mặc định.
+3. Bấm **Connect**, chọn đúng project/branch/database và sao chép toàn bộ chuỗi PostgreSQL, gồm tham số TLS do Neon cấp.
+4. Không cần tạo bảng thủ công; chương trình tự tạo khi kết nối lần đầu.
+
+Xem [hướng dẫn kết nối Neon](https://neon.com/docs/connect/connect-from-any-app). Giữ nguyên chuỗi được cấp. Không dán chuỗi thật vào source, README hoặc cuộc trò chuyện.
+
+### 2. Cấu hình Render
+
+Với service đã có, vào **Render > KDautoform > Environment > Add Environment Variable**:
+
+| Key | Value |
+| --- | --- |
+| `KD_DATABASE_URL` | Chuỗi kết nối PostgreSQL vừa lấy |
+
+Lưu và deploy code mới. Blueprint mới sẽ hỏi giá trị này lúc tạo. Khi cập nhật Blueprint cũ, thêm secret bằng tay vào Environment của service.
+
+### 3. Cho Terminal dùng cùng kho cloud
 
 ```powershell
-git add google_form_tool.py
-git commit -m "Update access keys"
-git push origin main
+python -m pip install -r requirements.txt
+if (!(Test-Path -LiteralPath .env)) { Copy-Item -LiteralPath .env.example -Destination .env }
+code .env
 ```
 
-Chờ Render triển khai commit mới. Không sửa key trực tiếp trong container vì thay đổi có thể mất khi khởi động lại. Render Free không có shell quản trị trên dashboard.
+Trong `.env` đặt **đúng cùng chuỗi kết nối đã lưu trên Render**:
+
+```text
+KD_DATABASE_URL=postgresql://...chuoi-ket-noi-that-do-Neon-cap...
+```
+
+Chương trình tự đọc `.env` bên cạnh `google_form_tool.py` khi chạy Terminal. Biến đã đặt trong môi trường Terminal được ưu tiên hơn file.
+
+```powershell
+python google_form_tool.py --key-paths
+python google_form_tool.py --key-generate 5
+python google_form_tool.py --key-list
+```
+
+Dòng `Kho key: PostgreSQL (biến KD_DATABASE_URL)` xác nhận đang thao tác kho cloud. Key mới có hiệu lực trên web mà không cần redeploy; CSV key thật vẫn lưu ở máy Windows.
+
+Nếu dòng kho là đường dẫn SQLite, bạn đang dùng local. Key tạo ở SQLite không tự chuyển sang PostgreSQL. Bỏ trống `KD_DATABASE_URL` thì local dùng SQLite; cloud báo thiếu cấu hình.
+
+Giữ CSDL hiện tại qua các lần deploy. Xóa CSDL hoặc khôi phục bản sao trước thời điểm dùng key sẽ xóa/quay lại lịch sử dùng trong bản sao đó.
+
 
 ## Kiểm tra tại máy
 
@@ -112,13 +249,14 @@ Kiểm tra HTTP, xác thực, URL công khai và chế độ trình duyệt clou
 
 ```powershell
 python -B -m unittest discover -s tests -p test_deployment.py -v
+python -B -m unittest discover -s tests -p test_keys.py -v
 ```
 
-Nếu Docker Desktop đã bật và dùng Linux containers:
+Nếu Docker Desktop đã bật, dùng Linux containers và `.env` đã có `KD_DATABASE_URL`:
 
 ```powershell
 docker build -t kdautoform .
-docker run --rm --name kdautoform-local -p 8766:10000 -e KD_PUBLIC_URL=http://localhost:8766 kdautoform
+docker run --rm --name kdautoform-local --env-file .env -p 8766:10000 -e KD_PUBLIC_URL=http://localhost:8766 kdautoform
 ```
 
 Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-local` từ cửa sổ khác. Image dùng `tini` quản lý tiến trình và Chromium headless shell để giảm dung lượng. Nếu đổi cổng `8766`, đổi cả `-p` và `KD_PUBLIC_URL` cho khớp.
@@ -126,7 +264,7 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 ## Giới hạn
 
 - Render Free có 512 MB RAM, tự ngủ sau 15 phút không có truy cập. Chromium có thể vượt RAM với form nặng. Nếu log có `Out of memory`/`OOM`, thử form nhỏ hoặc chuyển máy chủ có nhiều RAM hơn. Không bảo đảm chạy liên tục nhiều lượt trên gói miễn phí.
-- Lượt chạy, phiên đăng nhập, cấu hình đang chỉnh ở RAM; nhật ký ở thư mục tạm. Chúng không được bảo toàn khi service ngủ, restart hoặc deploy. Tải nhật ký trước khi rời phiên; tránh cập nhật source/key lúc đang chạy.
+- Lượt chạy, phiên đăng nhập, cấu hình đang chỉnh ở RAM; nhật ký ở thư mục tạm. Chúng không được bảo toàn khi service ngủ, restart hoặc deploy. Trạng thái key đã dùng được giữ trong PostgreSQL riêng. Tải nhật ký trước khi rời phiên; tránh cập nhật source/key lúc đang chạy.
 - Nếu service dừng giữa lúc gửi, kiểm tra phản hồi đã lưu trong Google Form trước khi bắt đầu lại để tránh gửi trùng. Job web không tự tiếp tục sau restart.
 - Cloud không hiện cửa sổ Chromium trên máy người dùng. Theo dõi tiến độ qua web và nhật ký.
 - Form có đăng nhập, tải tệp, CAPTCHA hoặc quy tắc chưa hỗ trợ sẽ báo dừng.
@@ -139,7 +277,8 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 | `No open ports detected` | Kiểm tra CMD không bị ghi đè, `KD_HOST=0.0.0.0`, `PORT` hợp lệ. Log cần có dòng đang lắng nghe. |
 | `Thiếu URL công khai` | Đặt `KD_PUBLIC_URL` bằng URL HTTPS service nếu nền tảng không cấp `RENDER_EXTERNAL_URL`. |
 | `Phiên truy cập không hợp lệ` | Tải lại trang; kiểm tra `KD_PUBLIC_URL`/`KD_ALLOWED_ORIGINS` khớp chính xác thanh địa chỉ, gồm cả HTTPS. |
-| Key không đúng | Dùng chuỗi key thay vì mã băm; kiểm tra key đang bật và Render đã triển khai commit mới. Nếu nhập sai nhiều lần, chờ theo thông báo. |
+| Key không đúng hoặc đã dùng | Dùng chuỗi `KD-...`; kiểm tra trạng thái `0/1` bằng `--key-list`, kho Terminal và Render phải cùng PostgreSQL. Đợt đã chạy cần key mới. |
+| Cloud cần KD_DATABASE_URL | Thêm chuỗi PostgreSQL vào Render Environment; không dùng SQLite tạm trên Render Free. |
 | Không mở được Chromium | Runtime cần là Docker, Dockerfile đã chạy `playwright install --with-deps --only-shell chromium`. |
 | Web khởi động chậm sau khi để lâu | Gói Free đang thức dậy; đợi khởi động xong. |
 
