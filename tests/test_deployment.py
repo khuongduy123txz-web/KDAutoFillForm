@@ -266,14 +266,23 @@ class DeploymentTests(unittest.TestCase):
         self.assertGreaterEqual(self.request("POST", "/api/jobs", malicious, cookie=outsider_cookie,
                                             update_cookies=False)[0], 400)
 
-    def test_cloud_forces_headless_and_avoids_overlapping_browsers(self):
+    def test_cloud_forces_headless_and_allows_scans_while_jobs_are_queued(self):
         payload = self.seed_scan(mode="check")
         with patch.object(self.server.application, "run_job", return_value=None):
             status, _, result = self.request("POST", "/api/jobs", {**payload, "headless": False})
         self.assertEqual(status, 202, result)
         job = self.request("GET", "/api/jobs/" + result["job_id"])[2]
         self.assertTrue(job["headless"])
-        self.assertGreaterEqual(self.request("POST", "/api/scan", {"url": "https://docs.google.com/forms/d/e/test/viewform"})[0], 400)
+        app = self.server.application
+        with patch.object(app, "read_form_schema", return_value=app.scans["one-scan"]["schema"]):
+            status, _, result = self.request("POST", "/api/scan", {"url": "https://docs.google.com/forms/d/e/test/viewform"})
+            self.assertEqual(status, 202, result)
+            deadline = time.monotonic() + 2
+            while app.scan_state(result["scan_id"])["status"] == "scanning" and time.monotonic() < deadline:
+                time.sleep(.005)
+            scan = app.scan_state(result["scan_id"])
+            self.assertEqual(scan["status"], "ready", scan)
+            self.assertEqual(scan["owner_id"], self.guest_id)
 
     def test_custom_domain_and_render_default_url_work(self):
         with patch.dict(os.environ, {"KD_CLOUD": "1", "KD_PUBLIC_URL": "",
@@ -318,6 +327,17 @@ class DeploymentTests(unittest.TestCase):
         self.request("POST", "/api/jobs/" + identifier + "/stop", {})
         self.assertTrue(app.jobs[identifier]["control"].stopped)
         self.assertEqual(self.store.guest_usage(self.guest_id, fresh=True)["used"], 0)
+
+    def test_bad_key_throttle_does_not_block_another_guest_on_same_proxy(self):
+        for _ in range(6):
+            self.assertEqual(self.request("POST", "/api/auth/login", {"key": "KD-invalid"})[0], 401)
+        self.assertEqual(self.request("POST", "/api/auth/login", {"key": "KD-invalid"})[0], 429)
+        raw = tool.secrets.token_urlsafe(32)
+        self.store.ensure_guest(hashlib.sha256(raw.encode()).hexdigest())
+        status, _, body = self.request("POST", "/api/auth/login", {"key": self.raw_key},
+                                       cookie="kd_guest=" + raw, update_cookies=False)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["plan"], "unlimited")
 
     def test_ratio_preset_endpoint_does_not_charge_or_accept_unknown_presets(self):
         payload = self.seed_scan()

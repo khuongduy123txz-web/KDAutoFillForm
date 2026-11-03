@@ -1678,7 +1678,7 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <div><label class="label" for="intervalMax">Đến (giây)</label><input id="intervalMax" type="number" min="0" max="86400" step="1" value="2" disabled></div>
 <div><label class="label" for="sampleSeed">Seed tái tạo dữ liệu</label><input id="sampleSeed" type="number" min="0" max="9007199254740991" step="1" placeholder="Để trống: ngẫu nhiên"></div>
 <div><label class="label" for="referenceDate">Ngày tham chiếu</label><input id="referenceDate" type="date" min="1900-01-01" max="2100-12-31"></div></div>
-<p class="run-hint">Lượt đầu bắt đầu ngay. Khoảng gửi tính giữa hai lần bắt đầu; form dài sẽ được điền xong trước khi chạy lượt tiếp theo.</p><p class="run-hint">Thời gian hoàn tất phụ thuộc form và mạng. Nhịp 2 giây không bảo đảm điền xong trong 2 giây. Giữ cùng seed, cấu hình và ngày tham chiếu để lặp lại dữ liệu.</p><p id="durationEstimate" class="duration-estimate" aria-live="polite"></p><p id="runOptionsError" class="quantity-error" role="status" hidden></p></details>
+<p class="run-hint">Lượt đầu bắt đầu khi đến lượt trong hàng đợi. Khoảng gửi tính giữa hai lần bắt đầu; form dài sẽ được điền xong trước khi chạy lượt tiếp theo.</p><p class="run-hint">Thời gian hoàn tất phụ thuộc form và mạng. Nhịp 2 giây không bảo đảm điền xong trong 2 giây. Giữ cùng seed, cấu hình và ngày tham chiếu để lặp lại dữ liệu.</p><p id="durationEstimate" class="duration-estimate" aria-live="polite"></p><p id="runOptionsError" class="quantity-error" role="status" hidden></p></details>
 </section>
 <div class="workspace">
 <section class="questions" aria-labelledby="ratioTitle">
@@ -1744,7 +1744,7 @@ function runSchedule(){const mode=["random30_180","custom_random"].includes($("t
 function runSeed(){const raw=$("sampleSeed").value.trim();if(!raw)return null;const value=Number(raw);return Number.isSafeInteger(value)&&value>=0?value:undefined}
 function runReferenceDate(){const el=$("referenceDate");return el.value&&el.validity.valid?el.value:null}
 function formatDuration(value){if(!Number.isFinite(value))return "—";let seconds=Math.max(0,Math.ceil(value)),hours=Math.floor(seconds/3600);seconds%=3600;const minutes=Math.floor(seconds/60);seconds%=60;return (hours?hours+" giờ ":"")+(minutes?minutes+" phút ":"")+(seconds||(!hours&&!minutes)?seconds+" giây":"")}
-function updateRunOptions(){const schedule=runSchedule(),seed=runSeed(),active=Boolean(activeJob());for(const id of ["timingPreset","intervalMin","sampleSeed","referenceDate"])$(id).disabled=active;$("intervalMax").disabled=active||!["random30_180","custom_random"].includes($("timingPreset").value);$("engineMode").disabled=active||state.providerMode!=="google";const error=!schedule?"Chọn khoảng thời gian hợp lệ từ 0 đến 86.400 giây; giá trị Đến không được nhỏ hơn Từ.":seed===undefined?"Seed cần là số nguyên không âm, tối đa 9007199254740991.":!runReferenceDate()?"Chọn ngày tham chiếu hợp lệ để tái tạo dữ liệu.":"";$("runOptionsError").hidden=!error;$("runOptionsError").textContent=error;const n=quantity();$("durationEstimate").textContent=!schedule||n===null?"":n===0?"Chạy liên tục đến khi bạn dừng.":n===1?"Một lượt bắt đầu ngay, không cần chờ khoảng gửi.":"Nhịp gửi dự kiến: "+formatDuration((n-1)*schedule.min_seconds)+(schedule.max_seconds!==schedule.min_seconds?" – "+formatDuration((n-1)*schedule.max_seconds):"")+". Form dài có thể cần thêm thời gian."}
+function updateRunOptions(){const schedule=runSchedule(),seed=runSeed(),active=Boolean(activeJob());for(const id of ["timingPreset","intervalMin","sampleSeed","referenceDate"])$(id).disabled=active;$("intervalMax").disabled=active||!["random30_180","custom_random"].includes($("timingPreset").value);$("engineMode").disabled=active||state.providerMode!=="google";const error=!schedule?"Chọn khoảng thời gian hợp lệ từ 0 đến 86.400 giây; giá trị Đến không được nhỏ hơn Từ.":seed===undefined?"Seed cần là số nguyên không âm, tối đa 9007199254740991.":!runReferenceDate()?"Chọn ngày tham chiếu hợp lệ để tái tạo dữ liệu.":"";$("runOptionsError").hidden=!error;$("runOptionsError").textContent=error;const n=quantity();$("durationEstimate").textContent=!schedule||n===null?"":n===0?"Chạy liên tục đến khi bạn dừng.":n===1?"Một lượt được xử lý khi đến vị trí trong hàng đợi.":"Nhịp gửi dự kiến: "+formatDuration((n-1)*schedule.min_seconds)+(schedule.max_seconds!==schedule.min_seconds?" – "+formatDuration((n-1)*schedule.max_seconds):"")+". Form dài có thể cần thêm thời gian."}
 function persistRunOptions(){localStorage.setItem("formpilot.runOptions",JSON.stringify({engine:$("engineMode").value,preset:$("timingPreset").value,min:$("intervalMin").value,max:$("intervalMax").value,seed:$("sampleSeed").value,referenceDate:$("referenceDate").value}))}
 function restoreRunOptions(){const today=new Date();$("referenceDate").value=today.getFullYear()+"-"+String(today.getMonth()+1).padStart(2,"0")+"-"+String(today.getDate()).padStart(2,"0");try{const saved=JSON.parse(localStorage.getItem("formpilot.runOptions")||"null");if(saved){if(["fast","compatible"].includes(saved.engine))$("engineMode").value=saved.engine;if([...$("timingPreset").options].some(o=>o.value===saved.preset))$("timingPreset").value=saved.preset;for(const [id,key] of [["intervalMin","min"],["intervalMax","max"],["sampleSeed","seed"],["referenceDate","referenceDate"]])if(saved[key]!==undefined)$(id).value=saved[key]}}catch{}updateRunOptions()}
 function ready(){return Boolean(state.access)&&!state.access.locked&&Boolean(state.schema)&&!state.scanning&&allowedCount()&&Boolean(runSchedule())&&runSeed()!==undefined&&Boolean(runReferenceDate())&&state.schema.fields.every(fieldValid)}
@@ -1767,14 +1767,14 @@ function undoRates(){if(!state.undo.length||activeJob())return;state.config=JSON
 function updateRate(fieldId,optionIndex,value){rememberRates();const field=state.schema.fields.find(f=>f.id===fieldId);if(!field)return;const rate=Number(value);state.config[fieldId].rates[field.options[optionIndex]]=rate;const card=$(cardId(field));card.querySelectorAll('[data-option="'+optionIndex+'"]').forEach(input=>{if(input!==document.activeElement)input.value=value});updateCard(field);renderSummary();persistDraft();scheduleAuto()}
 function refreshCard(field){const old=$(cardId(field));if(old){old.outerHTML=buildCard(field);updateCard(field)}}
 function normalizeField(field,balanced=false){if(!field.options.length)return;if(["multiple","grid_multiple"].includes(field.kind)){if(balanced){const target=Math.min(field.maximum*100,Math.max(field.minimum*100,180));let values=apportion(field.options.map(()=>1),target);state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}return}const values=apportion(field.options.map(option=>balanced?1:Math.max(0,Number(state.config[field.id].rates[option])||0)));state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}
-async function scanForm(){const url=$("formUrl").value.trim();const detected=providerFromLink(url);if(detected&&detected!==state.providerMode)selectProvider(detected);cancelCountdown();if(activeJob())return;if(state.access?.locked){openKeyModal("Bạn đã dùng hết 10 lượt miễn phí.");return}if(!validLink(url)){status(url?"Vui lòng nhập link hợp lệ cho loại biểu mẫu đã chọn.":"Google Forms và Microsoft Forms công khai",url?"error":"");return}const token=++state.scanToken;state.scanning=true;state.armed=true;state.schema=null;state.config={};$("formMeta").hidden=true;$("toolbar").hidden=true;$("academicTools").hidden=true;$("fieldCount").textContent="Đang đọc...";$("questionList").innerHTML='<div class="loading-skeleton" aria-label="Đang đọc câu hỏi"></div>';status("Đang đọc câu hỏi và tất cả các trang...","loading");renderSummary();try{const result=await api("/api/scan",{url,provider:state.providerMode});if(token!==state.scanToken)return;state.scanId=result.scan_id;const poll=async()=>{if(token!==state.scanToken)return;try{const value=await api("/api/scans/"+state.scanId);if(token!==state.scanToken)return;if(value.status==="scanning"){setTimeout(poll,650);return}if(value.status==="error")throw Error(value.error);state.schema=value.schema;state.config=value.config;state.undo=[];$("undoRates").disabled=true;state.scanning=false;localStorage.setItem("formpilot.scan",state.scanId);localStorage.setItem("formpilot.url",url);renderQuestions();status("Đã đọc "+value.schema.question_count+" câu hỏi qua "+value.schema.pages.length+" trang.","success");scheduleAuto()}catch(error){if(token===state.scanToken)scanError(error)}};poll()}catch(error){if(token===state.scanToken)scanError(error)}}
+async function scanForm(){const url=$("formUrl").value.trim();const detected=providerFromLink(url);if(detected&&detected!==state.providerMode)selectProvider(detected);cancelCountdown();if(activeJob())return;if(state.access?.locked){openKeyModal("Bạn đã dùng hết 10 lượt miễn phí.");return}if(!validLink(url)){status(url?"Vui lòng nhập link hợp lệ cho loại biểu mẫu đã chọn.":"Google Forms và Microsoft Forms công khai",url?"error":"");return}const token=++state.scanToken;state.scanning=true;state.armed=true;state.schema=null;state.config={};$("formMeta").hidden=true;$("toolbar").hidden=true;$("academicTools").hidden=true;$("fieldCount").textContent="Đang đọc...";$("questionList").innerHTML='<div class="loading-skeleton" aria-label="Đang đọc câu hỏi"></div>';status("Đang đọc câu hỏi và tất cả các trang...","loading");renderSummary();try{const result=await api("/api/scan",{url,provider:state.providerMode});if(token!==state.scanToken)return;state.scanId=result.scan_id;const poll=async()=>{if(token!==state.scanToken)return;try{const value=await api("/api/scans/"+state.scanId);if(token!==state.scanToken)return;if(value.status==="scanning"){status(value.queue_waiting?"Biểu mẫu đang xếp hàng đọc"+(value.queue_position?" · vị trí "+value.queue_position:"")+"...":"Đang đọc câu hỏi và tất cả các trang...","loading");setTimeout(poll,1500);return}if(value.status==="error")throw Error(value.error);state.schema=value.schema;state.config=value.config;state.undo=[];$("undoRates").disabled=true;state.scanning=false;localStorage.setItem("formpilot.scan",state.scanId);localStorage.setItem("formpilot.url",url);renderQuestions();status("Đã đọc "+value.schema.question_count+" câu hỏi qua "+value.schema.pages.length+" trang.","success");scheduleAuto()}catch(error){if(token===state.scanToken)scanError(error)}};poll()}catch(error){if(token===state.scanToken)scanError(error)}}
 function scanError(error){state.scanning=false;state.schema=null;state.config={};state.armed=false;status(error.message,"error");$("fieldCount").textContent="0 câu hỏi";$("questionList").innerHTML=emptyMarkup;renderSummary();toast(error.message)}
 async function startJob(checkOnly){cancelCountdown();if(state.access?.locked){openKeyModal();return}if(!ready()||activeJob())return;state.armed=false;const count=quantity(),schedule=runSchedule(),seed=runSeed();try{const result=await api("/api/jobs",{scan_id:state.scanId,count,config:state.config,schedule,seed,engine:$("engineMode").value,reference_date:runReferenceDate(),headless:!$("showBrowser").checked,mode:checkOnly?"check":"send"});localStorage.setItem("formpilot.job",result.job_id);state.pollErrors=0;state.job={id:result.job_id,mode:result.mode,status:"queued",processed:0,total:result.mode==="check"?1:count,events:[],schedule,seed,engine:state.providerMode==="google"?$("engineMode").value:"compatible"};$("statsPanel").hidden=true;$("reportContent").textContent="Bấm để xem thống kê của đợt này.";renderJob();pollJob()}catch(error){toast(error.message);renderSummary()}}
 function queuePoll(delay){clearTimeout(state.pollTimer);state.pollTimer=setTimeout(pollJob,delay)}
-async function pollJob(){if(!state.job)return;if(state.polling){queuePoll(500);return;}clearTimeout(state.pollTimer);state.polling=true;const id=state.job.id;try{const value=await api("/api/jobs/"+id);if(state.job?.id!==id)return;state.job=value;state.pollErrors=0;renderJob();if(activeJob())queuePoll(document.hidden?15000:state.job.waiting||state.job.paused?5000:2000)}catch(error){state.pollErrors++;if(error.status===401||error.status===404||error.message.includes("Không tìm thấy lượt chạy")){state.job.status="error";state.job.error="Phiên chạy không còn trên máy chủ. Kiểm tra kết quả đã lưu trước khi chạy lại.";renderJob()}else{if(state.pollErrors===1)toast("Mất kết nối tiến độ. Công cụ sẽ tự nối lại, không gửi lại yêu cầu chạy.");$("runMeta").textContent="Đang kết nối lại với máy chủ...";queuePoll(Math.min(30000,2000*2**Math.min(4,state.pollErrors)))}}finally{state.polling=false}}
+async function pollJob(){if(!state.job)return;if(state.polling){queuePoll(500);return;}clearTimeout(state.pollTimer);state.polling=true;const id=state.job.id;try{const value=await api("/api/jobs/"+id);if(state.job?.id!==id)return;state.job=value;state.pollErrors=0;renderJob();if(activeJob())queuePoll(document.hidden?15000:state.job.waiting||state.job.paused||state.job.queue_waiting?5000:2000)}catch(error){state.pollErrors++;if(error.status===401||error.status===404||error.message.includes("Không tìm thấy lượt chạy")){state.job.status="error";state.job.error="Phiên chạy không còn trên máy chủ. Kiểm tra kết quả đã lưu trước khi chạy lại.";renderJob()}else{if(state.pollErrors===1)toast("Mất kết nối tiến độ. Công cụ sẽ tự nối lại, không gửi lại yêu cầu chạy.");$("runMeta").textContent="Đang kết nối lại với máy chủ...";queuePoll(Math.min(30000,2000*2**Math.min(4,state.pollErrors)))}}finally{state.polling=false}}
 function secondsLabel(value){return Number(value).toLocaleString("vi-VN",{maximumFractionDigits:2})+" giây"}
 function renderResponseTiming(){const job=state.job,node=$("responseTiming");if(!job||!Number.isFinite(job.last_response_seconds)){node.textContent="";return}const m=job.last_performance||{},name=job.engine==="fast"?"Nhanh":"Tương thích";node.textContent="Lượt vừa xong: "+secondsLabel(job.last_response_seconds)+" · "+name+(job.average_response_seconds?" · TB "+secondsLabel(job.average_response_seconds)+"/lượt":"");node.title=[["load_ms","Tải"],["fill_ms","Điền"],["navigation_ms","Chuyển trang"],["submit_ms","Xác nhận"]].filter(([key])=>Number.isFinite(m[key])).map(([key,label])=>label+": "+secondsLabel(m[key]/1000)).join(" · ")+(Number.isFinite(m.batch_fields)?" · Điền nhanh: "+m.batch_fields+" ô; tương thích: "+(m.fallback_fields||0)+" ô":"")}
-function renderJob(){const job=state.job;if(!job)return;$("jobPanel").hidden=false;const labels={queued:"ĐANG CHUẨN BỊ",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+(activeJob()&&job.paused?"paused":activeJob()&&job.waiting?"waiting":job.status);if(activeJob()&&job.paused)$("jobStatus").textContent="TẠM DỪNG";else if(activeJob()&&job.waiting)$("jobStatus").textContent="ĐANG CHỜ";$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Biểu mẫu đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";const sav=state.spssAvailable&&job.confirmed>0;$("downloadSpss").hidden=!sav;$("spssNote").hidden=!sav;$("downloadSpss").href="/api/jobs/"+job.id+"/export.sav";$("downloadCsv").hidden=!state.csvAvailable||!job.confirmed;$("downloadCsv").href="/api/jobs/"+job.id+"/export.zip";$("statsPanel").hidden=!job.confirmed;$("pauseButton").hidden=!activeJob();$("pauseButton").disabled=job.status==="stopping";$("pauseButton").textContent=job.pause_requested?"Tiếp tục":"Tạm dừng";$("runMeta").textContent=(job.seed!==null&&job.seed!==undefined?"Seed: "+job.seed+" · ":"")+(job.elapsed_seconds!==undefined?"Đã chạy "+formatDuration(job.elapsed_seconds):"");paintRunTiming();renderResponseTiming();renderSummary()}
+function renderJob(){const job=state.job;if(!job)return;$("jobPanel").hidden=false;const labels={queued:"ĐANG XẾP HÀNG",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+(activeJob()&&job.paused?"paused":activeJob()&&job.waiting?"waiting":job.status);if(activeJob()&&job.paused)$("jobStatus").textContent="TẠM DỪNG";else if(activeJob()&&job.waiting)$("jobStatus").textContent="ĐANG CHỜ";else if(activeJob()&&job.queue_waiting)$("jobStatus").textContent="ĐANG XẾP HÀNG";$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Biểu mẫu đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";const sav=state.spssAvailable&&job.confirmed>0;$("downloadSpss").hidden=!sav;$("spssNote").hidden=!sav;$("downloadSpss").href="/api/jobs/"+job.id+"/export.sav";$("downloadCsv").hidden=!state.csvAvailable||!job.confirmed;$("downloadCsv").href="/api/jobs/"+job.id+"/export.zip";$("statsPanel").hidden=!job.confirmed;$("pauseButton").hidden=!activeJob();$("pauseButton").disabled=job.status==="stopping";$("pauseButton").textContent=job.pause_requested?"Tiếp tục":"Tạm dừng";$("runMeta").textContent=(job.seed!==null&&job.seed!==undefined?"Seed: "+job.seed+" · ":"")+(job.elapsed_seconds!==undefined?"Đã chạy "+formatDuration(job.elapsed_seconds):"");paintRunTiming();renderResponseTiming();renderSummary()}
 $("formUrl").addEventListener("input",()=>{clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.armed=false;if(validLink($("formUrl").value.trim()))urlTimer=setTimeout(scanForm,850);else{state.schema=null;state.config={};state.scanning=false;$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("academicTools").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link Google Forms hoặc Microsoft Forms để bắt đầu.");renderSummary()}});
 $("scanAgain").addEventListener("click",scanForm);
 document.querySelectorAll(".provider-tabs button").forEach(button=>button.addEventListener("click",()=>selectProvider(button.dataset.provider,true)));
@@ -1793,7 +1793,7 @@ $("countdown").addEventListener("click",event=>{if(event.target.closest("#pauseA
 $("undoRates").addEventListener("click",undoRates);document.addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"&&!event.target.matches("input,textarea,select")){event.preventDefault();undoRates()}});
 $("searchQuestions").addEventListener("input",filterQuestions);$("pageFilter").addEventListener("change",filterQuestions);
 $("testButton").addEventListener("click",()=>startJob(true));
-function paintRunTiming(){const job=state.job;if(!job||!activeJob()||job.status==="stopping")return;if(job.paused)$("jobDetail").textContent="Đã tạm dừng. Nhấn Tiếp tục để tiếp tục từ vị trí này.";else if(job.pause_requested)$("jobDetail").textContent="Sẽ tạm dừng ở bước kiểm tra tiếp theo; yêu cầu gửi đang diễn ra có thể hoàn tất.";else if(job.waiting){const seconds=job.next_run_at?Math.max(0,job.next_run_at-Date.now()/1000):job.remaining_seconds;$("jobDetail").textContent="Lượt tiếp theo sau "+formatDuration(seconds)+". Bạn có thể tạm dừng hoặc dừng đợt chạy."}}
+function paintRunTiming(){const job=state.job;if(!job||!activeJob()||job.status==="stopping")return;if(job.paused)$("jobDetail").textContent="Đã tạm dừng. Khi tiếp tục, phản hồi chưa gửi sẽ được điền lại với cùng đáp án.";else if(job.pause_requested)$("jobDetail").textContent="Sẽ tạm dừng ở bước kiểm tra tiếp theo; yêu cầu gửi đang diễn ra có thể hoàn tất.";else if(job.queue_waiting){$("jobDetail").textContent="Đang xếp hàng"+(job.queue_position?" · vị trí "+job.queue_position:"")+". Bạn có thể giữ trang mở hoặc quay lại sau. Chờ hàng đợi không trừ lượt miễn phí."}else if(job.waiting){const seconds=job.next_run_at?Math.max(0,job.next_run_at-Date.now()/1000):job.remaining_seconds;$("jobDetail").textContent="Lượt tiếp theo sau "+formatDuration(seconds)+". Bạn có thể tạm dừng hoặc dừng đợt chạy."}}
 $("pauseButton").addEventListener("click",async()=>{if(!activeJob())return;const action=state.job.pause_requested?"resume":"pause";$("pauseButton").disabled=true;try{state.job=await api("/api/jobs/"+state.job.id+"/"+action,{});renderJob()}catch(error){toast(error.message);$("pauseButton").disabled=false}});
 $("timingPreset").addEventListener("change",()=>{const value=$("timingPreset").value,map={fast:[2,2],fixed3:[3,3],fixed30:[30,30],fixed60:[60,60],random30_180:[30,180],fixed180:[180,180]};if(map[value]){$("intervalMin").value=map[value][0];$("intervalMax").value=map[value][1]}persistRunOptions();renderSummary();scheduleAuto()});
 for(const id of ["engineMode","intervalMin","intervalMax","sampleSeed","referenceDate"])$(id).addEventListener("input",()=>{if(!["engineMode","sampleSeed","referenceDate"].includes(id))$("timingPreset").value=["random30_180","custom_random"].includes($("timingPreset").value)?"custom_random":"custom_fixed";persistRunOptions();renderSummary();scheduleAuto()});
@@ -2051,9 +2051,22 @@ class WebStopRequested(Exception):
     pass
 
 
+class WebPauseRequested(Exception):
+    pass
+
+
 class WebApplication:
-    def __init__(self, force_check=False, headless_only=False, key_store=None):
+    def __init__(self, force_check=False, headless_only=False, key_store=None, *, browser_workers=None, scan_workers=None):
         import threading
+        from work_queue import TaskDispatcher
+        def workers(value, variable, default):
+            try:
+                result = int(os.environ.get(variable, default) if value is None else value)
+            except (TypeError, ValueError) as exc:
+                raise FormError(variable + " cần là số nguyên từ 1 đến 8.") from exc
+            if not 1 <= result <= 8:
+                raise FormError(variable + " cần là số nguyên từ 1 đến 8.")
+            return result
         self.key_store = key_store or configured_key_store()
         self.headless_only = headless_only
         self.lock = threading.RLock()
@@ -2061,32 +2074,124 @@ class WebApplication:
         self.scans, self.jobs = {}, {}
         self.token = secrets.token_urlsafe(32)
         self.force_check = force_check
+        self._closing = False
+        self._last_cleanup = 0
+        self._browser_local = threading.local()
+        self.browser_queue = TaskDispatcher(workers(browser_workers, "KD_BROWSER_WORKERS", 1),
+                                            name="kd-browser", on_worker_exit=self._close_worker_browser)
+        self.scan_queue = TaskDispatcher(workers(scan_workers, "KD_SCAN_WORKERS", 2), name="kd-metadata")
 
-    def scan(self, url, provider="auto"):
-        import threading
+    def _close_worker_browser(self):
+        launcher = getattr(self._browser_local, "launcher", None)
+        if launcher is not None:
+            try:
+                launcher.__exit__(None, None, None)
+            except Exception:
+                pass
+            finally:
+                self._browser_local.launcher = None
+
+    def _browser(self, browser_type, headless=True):
+        from contextlib import contextmanager
+        @contextmanager
+        def lease():
+            # Real Playwright objects stay on their owning worker thread. Every
+            # respondent still gets a fresh context; only Chromium is reused.
+            if not hasattr(FormBrowser, "new_session"):
+                with browser_type(headless=headless) as browser:
+                    yield browser
+                return
+            launcher = getattr(self._browser_local, "launcher", None)
+            if launcher is not None and (launcher.headless != headless or not launcher.browser.is_connected()):
+                self._close_worker_browser()
+                launcher = None
+            if launcher is None:
+                launcher = FormBrowser(headless=headless).__enter__()
+                self._browser_local.launcher = launcher
+            browser = browser_type(headless=headless)
+            browser.browser = launcher.browser
+            try:
+                yield browser
+            finally:
+                if browser.session is not None:
+                    try:
+                        browser.session.close()
+                    except Exception:
+                        # Cleanup cannot invalidate a confirmed response. Retire
+                        # this launcher before the next respondent uses it.
+                        self._close_worker_browser()
+        return lease()
+
+    def close(self, wait=True):
+        with self.lock:
+            self._closing = True
+            jobs = list(self.jobs.values())
+        for job in jobs:
+            if job["status"] in ("queued", "running", "stopping"):
+                self.stop_job(job["id"])
+        self.scan_queue.shutdown(wait=wait, cancel_pending=True)
+        self.browser_queue.shutdown(wait=wait, cancel_pending=True)
+
+    def cleanup(self):
+        now = time.time()
+        with self.lock:
+            if now - self._last_cleanup < 60:
+                return
+            self._last_cleanup = now
+            active_scans = {job.get("scan_id") for job in self.jobs.values()
+                            if job["status"] in ("queued", "running", "stopping")}
+            self.scans = {key: value for key, value in self.scans.items()
+                          if value["status"] == "scanning" or key in active_scans
+                          or now - value.get("updated_at", value.get("created_at", now)) < 3600}
+            expired = [key for key, job in self.jobs.items()
+                       if job["status"] in ("completed", "stopped", "error")
+                       and now - job.get("updated_at", now) > 86400]
+            for key in expired:
+                job = self.jobs.pop(key)
+                path = Path(job.get("log_path", ""))
+                folder = Path(tempfile.gettempdir()) / "google_form_tool"
+                if path.parent == folder and path.name == "web_" + key + ".jsonl":
+                    path.unlink(missing_ok=True)
+
+    def read_form_schema(self, url):
+        if urlsplit(url).hostname in ("docs.google.com", "forms.gle", "forms.google.com"):
+            from form_scanning import scan_google
+            data, resolved = scan_google(url)
+            return parse_schema(data, resolved)
+        with self._browser(form_browser(url), headless=True) as browser:
+            return browser.load(url)
+
+    def scan(self, url, provider="auto", owner_id=None):
         if provider not in ("auto", "google", "microsoft", "html"):
             raise FormError("Loại biểu mẫu không hợp lệ.")
         url = form_link(str(url), allow_generic=provider == "html")
+        self.cleanup()
         scan_id = secrets.token_hex(8)
-        state = {"id": scan_id, "status": "scanning", "url": url}
+        state = {"id": scan_id, "status": "scanning", "url": url, "owner_id": owner_id,
+                 "created_at": time.time(), "updated_at": time.time()}
         with self.lock:
-            if self.headless_only and (
-                any(item["status"] == "scanning" for item in self.scans.values())
-                or any(item["status"] in ("queued", "running", "stopping") for item in self.jobs.values())
-            ):
-                raise FormError("Máy chủ đang đọc hoặc điền một form. Vui lòng chờ hoàn tất rồi thử lại.")
+            if self._closing:
+                raise FormError("Máy chủ đang khởi động lại. Vui lòng thử lại sau.")
+            if owner_id and any(item.get("owner_id") == owner_id and item["status"] == "scanning"
+                                for item in self.scans.values()):
+                raise FormError("Biểu mẫu của bạn đang được đọc. Vui lòng chờ đọc xong.")
             self.scans[scan_id] = state
+        queue = self.scan_queue if urlsplit(url).hostname in ("docs.google.com", "forms.gle", "forms.google.com") else self.browser_queue
         def worker():
             try:
-                with form_browser(url)(headless=True) as browser:
-                    schema = browser.load(url)
+                schema = self.read_form_schema(url)
                 config = default_web_config(schema, secrets.randbits(32))
                 with self.lock:
-                    state.update(status="ready", schema=schema, config=config)
+                    state.update(status="ready", schema=schema, config=config, updated_at=time.time())
             except Exception as exc:
                 with self.lock:
-                    state.update(status="error", error=str(exc))
-        threading.Thread(target=worker, daemon=True).start()
+                    state.update(status="error", error=str(exc), updated_at=time.time())
+        try:
+            queue.submit("scan-" + scan_id, worker)
+        except RuntimeError:
+            with self.lock:
+                self.scans.pop(scan_id, None)
+            raise FormError("Máy chủ đang khởi động lại. Vui lòng thử lại sau.")
         return {"scan_id": scan_id}
 
     def scan_state(self, scan_id):
@@ -2094,7 +2199,12 @@ class WebApplication:
             state = self.scans.get(scan_id)
             if state is None:
                 raise FormError("Phiên đọc form không còn tồn tại. Hãy đọc lại.")
-            return dict(state)
+            result = dict(state)
+            if state["status"] == "scanning":
+                queue = self.scan_queue if urlsplit(state.get("url", "")).hostname in ("docs.google.com", "forms.gle", "forms.google.com") else self.browser_queue
+                queued = queue.snapshot("scan-" + scan_id)
+                result.update(queue_position=queued["queue_position"], queue_waiting=queued["queued"])
+            return result
 
     def job_state(self, job_id, compact=False):
         import copy
@@ -2105,10 +2215,18 @@ class WebApplication:
             excluded = {"stop_event", "control", "schema", "config", "access_key_hash", "access_activation_id", "owner_id", "guest_id"}
             if compact:
                 excluded.update(("counts", "answered_counts", "last_profile"))
-            snapshot = {key: value for key, value in job.items() if key not in excluded}
+            snapshot = {key: value for key, value in job.items() if key not in excluded and not key.startswith("_")}
             if compact:
                 snapshot["events"] = job.get("events", [])[-12:]
             snapshot["elapsed_seconds"] = round(max(0, time.time() - job.get("created_at", time.time())), 1)
+            if job["status"] in ("queued", "running", "stopping"):
+                queue = self.browser_queue.snapshot(job_id)
+                remaining = max(0, job.get("_next_due", 0) - time.monotonic())
+                snapshot.update(worker_capacity=queue["capacity"], queue_position=queue["queue_position"],
+                                queue_waiting=queue["queued"] and not job["control"].paused and remaining <= 0)
+                if not job["control"].paused:
+                    snapshot.update(waiting=remaining > 0, remaining_seconds=remaining,
+                                    next_run_at=time.time() + remaining if remaining else None)
             return copy.deepcopy(snapshot)
 
     def report_job(self, job_id):
@@ -2147,8 +2265,7 @@ class WebApplication:
             if job is None or not job.get("confirmed") or not job.get("log_path"):
                 raise FormError("Chưa có phản hồi được xác nhận để xuất dữ liệu. Điền thử không tạo dữ liệu đã gửi.")
             schema, log_path = job["schema"], job["log_path"]
-        if not self.export_lock.acquire(blocking=False):
-            raise FormError("Máy chủ đang xuất dữ liệu SPSS/CSV. Vui lòng thử lại sau khi hoàn tất.")
+        self.export_lock.acquire()
         target = None
         try:
             descriptor, filename = tempfile.mkstemp(prefix="KDautoform_", suffix="." + kind)
@@ -2212,9 +2329,10 @@ class WebApplication:
         job = {"id": job_id, "status": "queued", "mode": mode, "requested": count,
                "total": 1 if mode == "check" else count, "processed": 0, "confirmed": 0,
                "current_page": 0, "current_question": "", "events": [], "counts": {}, "answered_counts": {},
-               "schema": state["schema"], "config": config, "delay": float(delay),
+               "schema": state["schema"], "config": config, "scan_id": state["id"], "delay": float(delay),
                "schedule": schedule, "paused": False, "pause_requested": False, "waiting": False,
                "engine": engine, "last_response_seconds": None, "last_performance": {},
+               "queue_waiting": True, "queue_position": 0, "worker_capacity": self.browser_queue.capacity,
                "next_run_at": None, "remaining_seconds": 0,
                "headless": self.headless_only or bool(payload.get("headless", True)), "stop_event": threading.Event(),
                "created_at": time.time(), "updated_at": time.time(), "title": state["schema"]["title"],
@@ -2225,10 +2343,11 @@ class WebApplication:
                and not any(field["exclusive_columns"] for field in state["schema"]["fields"])}
         job["control"] = RunControl(job["stop_event"])
         with self.lock:
-            if self.headless_only and any(item["status"] == "scanning" for item in self.scans.values()):
-                raise FormError("Máy chủ đang đọc form. Vui lòng chờ đọc xong rồi bắt đầu.")
-            if any(item["status"] in ("queued", "running", "stopping") for item in self.jobs.values()):
-                raise FormError("Một lượt chạy đang hoạt động. Hãy dừng hoặc chờ hoàn tất.")
+            if self._closing:
+                raise FormError("Máy chủ đang khởi động lại. Vui lòng thử lại sau.")
+            if any(item.get("owner_id") == job["owner_id"] and item["status"] in ("queued", "running", "stopping")
+                   for item in self.jobs.values()):
+                raise FormError("Bạn đã có một đợt đang hoạt động. Hãy dừng hoặc chờ đợt đó hoàn tất.")
             if not job["owner_id"] or not active_job_key(job, self.key_store):
                 raise FormError("Phiên sử dụng không hợp lệ. Vui lòng tải lại trang.")
             if not job["access_key_id"]:
@@ -2242,7 +2361,7 @@ class WebApplication:
             self.jobs[job_id] = job
             self.scans[state["id"]]["config"] = config
         try:
-            threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
+            self._enqueue_job(job)
         except RuntimeError as exc:
             job.update(status="error", error="Không khởi động được đợt chạy.")
             if mode == "send" and job["access_key_id"]:
@@ -2250,43 +2369,105 @@ class WebApplication:
             raise FormError("Không khởi động được đợt chạy. Chưa gửi phản hồi; bạn có thể thử lại.") from exc
         return {"job_id": job_id, "mode": mode, "key_used": False}
 
+    def _enqueue_job(self, job, due=None):
+        due = time.monotonic() if due is None else due
+        with self.lock:
+            if job.get("_finished") or self._closing:
+                return
+            job["_next_due"] = due
+            job.update(status="queued", queue_waiting=due <= time.monotonic(),
+                       waiting=due > time.monotonic(), next_run_at=time.time() + max(0, due - time.monotonic()),
+                       remaining_seconds=max(0, due - time.monotonic()))
+        self.browser_queue.submit(job["id"], lambda: self.run_job(job), due_monotonic=due,
+                                  ready=lambda: not job["control"].paused and not job["control"].stopped)
+
+    def _finish_job(self, job, status, error=None):
+        with self.lock:
+            if job.get("_finished"):
+                return
+            job["_finished"] = True
+            job.update(status=status, current_question="", paused=False, pause_requested=False, waiting=False,
+                       queue_waiting=False, queue_position=0, next_run_at=None, remaining_seconds=0)
+            if error:
+                job["error"] = error
+            job.pop("_execution", None)
+        self.browser_queue.cancel(job["id"])
+        if job["mode"] == "send" and job["access_key_id"]:
+            try:
+                self.key_store.finish(job["access_key_id"], job["access_key_hash"], job["id"], status)
+            except FormError:
+                self.event(job, "Chưa cập nhật được kết quả vào kho key. Kiểm tra kết nối CSDL.", "warning")
+        self.event(job, error or ("Hoàn tất lượt chạy." if status == "completed" else "Đã dừng đợt chạy."),
+                   "error" if error else "success" if status == "completed" else "info")
+
     def run_job(self, job):
+        with self.lock:
+            if job.get("_finished"):
+                return
+            job["_executing"] = True
+            job.update(status="running", queue_waiting=False, waiting=False, next_run_at=None, remaining_seconds=0)
         try:
+            if job["control"].stopped or not active_job_key(job, self.key_store):
+                raise WebStopRequested()
+            if job["control"].paused:
+                raise WebPauseRequested()
             self._run_job(job)
-        except Exception as exc:
+        except WebPauseRequested:
             with self.lock:
-                job.update(status="error", error=str(exc), current_question="")
-            self.event(job, str(exc), "error")
+                paused = job["control"].paused
+                job.update(paused=paused, pause_requested=paused, status="queued", current_question="")
+            self.event(job, "Phản hồi chưa gửi sẽ được điền lại với cùng đáp án khi tiếp tục.")
+        except WebStopRequested:
+            self._finish_job(job, "stopped")
+        except Exception as exc:
+            self._finish_job(job, "error", str(exc))
         finally:
             with self.lock:
-                job.update(paused=False, pause_requested=False, waiting=False, next_run_at=None, remaining_seconds=0)
-            if job["mode"] == "send" and job["access_key_id"]:
-                try:
-                    self.key_store.finish(job["access_key_id"], job["access_key_hash"], job["id"], job["status"])
-                except FormError:
-                    self.event(job, "Chưa cập nhật được kết quả vào kho key. Kiểm tra kết nối CSDL.", "warning")
+                job["_executing"] = False
+        with self.lock:
+            terminal = job["status"] in ("completed", "stopped", "error")
+            finished = job.get("_finished")
+        if terminal:
+            if not finished:
+                self._finish_job(job, job["status"])
+            return
+        if job["control"].stopped:
+            self._finish_job(job, "stopped")
+            return
+        if job["total"] and job["processed"] >= job["total"]:
+            self._finish_job(job, "completed")
+            return
+        context = job.get("_execution", {})
+        due = context.get("next_due", time.monotonic())
+        self._enqueue_job(job, due)
 
     def _run_job(self, job):
         from run_scheduling import sample_interval
-        schema, stop = job["schema"], job["stop_event"]
-        app = self
-        control = job["control"]
-        pause_began, paused_total = None, 0.0
-        def control_state(value):
-            nonlocal pause_began, paused_total
-            now = time.monotonic()
-            if value["paused"] and pause_began is None:
-                pause_began = now
-            elif not value["paused"] and pause_began is not None:
-                paused_total += max(0, now - pause_began)
-                pause_began = None
-            with app.lock:
-                job.update(value)
-        def allowed():
-            return active_job_key(job, app.key_store)
+        schema, control, app = job["schema"], job["control"], self
+        context = job.get("_execution")
+        if context is None:
+            path = Path(tempfile.gettempdir()) / "google_form_tool" / ("web_" + job["id"] + ".jsonl")
+            log = RunLog(path)
+            context = {"sampler": WebRatioSampler(schema, job["config"], job["requested"], job["seed"], job["reference_date"]),
+                       "timing_rng": random.Random(job["seed"] ^ 0x4B4454494D45), "log": log}
+            with self.lock:
+                job["_execution"] = context
+                job["log_path"] = str(path)
+            log.write({"event": "run", "synthetic": True, "url": schema["url"], "count": job["requested"],
+                       "seed": job["seed"], "config": job["config"], "mode": job["mode"],
+                       "provider": schema.get("provider", "google"), "schedule": job["schedule"],
+                       "reference_date": job["reference_date"], "engine": job["engine"]})
+        sampler, log = context["sampler"], context["log"]
+        index = job["processed"] + 1
+        if "pending" not in context:
+            context["pending"] = {"answers": sampler.sample(index), "profile": sampler.last_profile}
+        pending = context["pending"]
+        answers, profile = pending["answers"], pending["profile"]
         def checkpoint():
-            if not control.checkpoint(access_check=allowed, on_state=control_state):
+            if control.stopped or not active_job_key(job, app.key_store):
                 raise WebStopRequested()
+            if control.paused:
+                raise WebPauseRequested()
         class ProgressBrowser(form_browser(schema["url"])):
             def before_field(self, field):
                 checkpoint()
@@ -2295,123 +2476,98 @@ class WebApplication:
                     job.update(current_page=field["page"] + 1, current_question=field["question"])
                 if changed:
                     app.event(job, f'Đang điền trang {field["page"] + 1}/{len(schema["pages"])}.')
-
             def before_navigation(self):
                 checkpoint()
-
             def fill_field(self, field, value):
                 self.before_field(field)
                 return super().fill_field(field, value)
             def prepare(self, schema, answers):
                 validate_answers(schema, answers)
                 return self._prepare(schema, answers)
-        path = Path(tempfile.gettempdir()) / "google_form_tool" / ("web_" + job["id"] + ".jsonl")
-        log = RunLog(path)
+        checkpoint()
+        started = time.monotonic()
         with self.lock:
-            job.update(status="running", log_path=str(path))
-        log.write({"event": "run", "synthetic": True, "url": schema["url"], "count": job["requested"],
-                   "seed": job["seed"], "config": job["config"], "mode": job["mode"],
-                   "provider": schema.get("provider", "google"), "schedule": job["schedule"],
-                   "reference_date": job["reference_date"], "engine": job["engine"]})
-        self.event(job, "Đã kích hoạt công cụ. Mở trình duyệt để điền toàn bộ biểu mẫu.")
-        try:
-            sampler = WebRatioSampler(schema, job["config"], job["requested"], job["seed"], job["reference_date"])
-            timing_rng = random.Random(job["seed"] ^ 0x4B4454494D45)
-            previous_started = None
-            with ProgressBrowser(headless=job["headless"]) as browser:
-                browser.engine = job["engine"]
-                for index in itertools.count(1):
-                    if job["total"] and index > job["total"]:
-                        break
-                    interval = sample_interval(job["schedule"], timing_rng) if previous_started is not None else 0
-                    if not control.await_next(previous_started, interval, access_check=allowed, on_state=control_state):
-                        raise WebStopRequested()
-                    previous_started = time.monotonic()
-                    pauses_before = paused_total
-                    with self.lock:
-                        job.update(current_page=0, current_question="", current_index=index)
-                    self.event(job, f'Bắt đầu lượt {index}.')
-                    answers = sampler.sample(index)
-                    browser.profile = sampler.last_profile
-                    report = browser.prepare(schema, answers)
+            job.update(current_page=0, current_question="", current_index=index, paused=False)
+        self.event(job, f'Bắt đầu lượt {index}.')
+        with self._browser(ProgressBrowser, headless=job["headless"]) as browser:
+            browser.engine = job["engine"]
+            browser.profile = profile
+            report = browser.prepare(schema, answers)
+            checkpoint()
+            log.write({"event": "filled", "index": index, "report": report, "answers": answers, "profile": profile})
+            if job["mode"] == "send":
+                reserved = attempted = False
+                try:
+                    if not job["access_key_id"]:
+                        self.key_store.consume_guest(job["guest_id"])
+                        reserved = True
                     checkpoint()
-                    log.write({"event": "filled", "index": index, "report": report,
-                               "answers": answers, "profile": sampler.last_profile})
-                    if job["mode"] == "send":
-                        reserved = attempted = False
+                    log.write({"event": "started", "index": index})
+                    checkpoint()
+                    attempted = True
+                    browser.submit(schema)
+                except (WebStopRequested, WebPauseRequested):
+                    raise
+                except Exception as exc:
+                    if attempted:
+                        log.write({"event": "unconfirmed", "index": index, "error": str(exc)})
+                    raise FormError(str(exc)) from exc
+                finally:
+                    if reserved and not attempted:
                         try:
-                            if not job["access_key_id"]:
-                                self.key_store.consume_guest(job["guest_id"])
-                                reserved = True
-                            checkpoint()
-                            log.write({"event": "started", "index": index})
-                            checkpoint()
-                            attempted = True
-                            browser.submit(schema)
-                        except WebStopRequested:
-                            raise
-                        except Exception as exc:
-                            if attempted:
-                                log.write({"event": "unconfirmed", "index": index, "error": str(exc)})
-                            raise FormError(str(exc)) from exc
-                        finally:
-                            if reserved and not attempted:
-                                try:
-                                    self.key_store.release_guest(job["guest_id"])
-                                except FormError:
-                                    self.event(job, "Chưa hoàn được lượt giữ chỗ chưa gửi. Kiểm tra kết nối kho lượt.", "warning")
-                        log.write({"event": "confirmed", "index": index, "report": report})
-                    with self.lock:
-                        job["processed"] += 1
-                        if job["mode"] == "send":
-                            job["confirmed"] += 1
-                        elapsed = max(0, time.monotonic() - previous_started - (paused_total - pauses_before))
-                        job["response_duration_total"] = job.get("response_duration_total", 0) + elapsed
-                        job["average_response_seconds"] = round(job["response_duration_total"] / job["processed"], 2)
-                        job["last_response_seconds"] = round(elapsed, 3)
-                        measured = getattr(browser, "metrics", {})
-                        job["last_performance"] = {key: round(value, 3) if isinstance(value, float) else value
-                                                   for key, value in measured.items()}
-                        for field in schema["fields"]:
-                            visited = (field["id"] in report["field_ids"] if "field_ids" in report
-                                       else field["page"] in report["page_indices"])
-                            if not visited or job["mode"] != "send":
-                                continue
-                            job["answered_counts"][field["id"]] = job["answered_counts"].get(field["id"], 0) + 1
-                            if field["options"]:
-                                value = answers[field["id"]]
-                                selected = value if isinstance(value, list) else [value]
-                                counts = job["counts"].setdefault(field["id"], {})
-                                for option in selected:
-                                    counts[option] = counts.get(option, 0) + 1
-                        job["last_profile"] = sampler.last_profile
-                    log.write({"event": "performance", "index": index, "seconds": round(elapsed, 3),
-                               "metrics": job["last_performance"], "engine": job["engine"]})
-                    self.event(job, f'Lượt {index}: đã điền đủ {report["questions"]} câu qua {report["pages"]} trang. '
-                               + ("Biểu mẫu đã xác nhận lưu." if job["mode"] == "send" else "Dừng trước Gửi, chưa gửi phản hồi."), "success")
-            with self.lock:
-                job.update(status="completed", current_question="")
-            self.event(job, "Hoàn tất lượt chạy.", "success")
-        except WebStopRequested:
-            with self.lock:
-                job.update(status="stopped", current_question="")
-            self.event(job, "Đã dừng theo yêu cầu. Không tự gửi lại các lượt đã xác nhận.", "warning")
-        except Exception as exc:
-            with self.lock:
-                job.update(status="error", error=str(exc), current_question="")
-            self.event(job, str(exc), "error")
+                            self.key_store.release_guest(job["guest_id"])
+                        except FormError:
+                            self.event(job, "Chưa hoàn được lượt giữ chỗ chưa gửi. Kiểm tra kết nối kho lượt.", "warning")
+                log.write({"event": "confirmed", "index": index, "report": report})
+            elapsed = max(0, time.monotonic() - started)
+            measured = getattr(browser, "metrics", {})
+        with self.lock:
+            job["processed"] += 1
+            if job["mode"] == "send":
+                job["confirmed"] += 1
+            job["response_duration_total"] = job.get("response_duration_total", 0) + elapsed
+            job["average_response_seconds"] = round(job["response_duration_total"] / job["processed"], 2)
+            job["last_response_seconds"] = round(elapsed, 3)
+            job["last_performance"] = {key: round(value, 3) if isinstance(value, float) else value for key, value in measured.items()}
+            for field in schema["fields"]:
+                visited = (field["id"] in report["field_ids"] if "field_ids" in report else field["page"] in report["page_indices"])
+                if not visited or job["mode"] != "send":
+                    continue
+                job["answered_counts"][field["id"]] = job["answered_counts"].get(field["id"], 0) + 1
+                if field["options"]:
+                    value = answers[field["id"]]
+                    selected = value if isinstance(value, list) else [value]
+                    counts = job["counts"].setdefault(field["id"], {})
+                    for option in selected:
+                        counts[option] = counts.get(option, 0) + 1
+            job["last_profile"] = profile
+            context.pop("pending", None)
+            context["next_due"] = started + sample_interval(job["schedule"], context["timing_rng"])
+        log.write({"event": "performance", "index": index, "seconds": round(elapsed, 3),
+                   "metrics": job["last_performance"], "engine": job["engine"]})
+        self.event(job, f'Lượt {index}: đã điền đủ {report["questions"]} câu qua {report["pages"]} trang. '
+                   + ("Biểu mẫu đã xác nhận lưu." if job["mode"] == "send" else "Dừng trước Gửi, chưa gửi phản hồi."), "success")
+        with self.lock:
+            if control.paused:
+                job.update(paused=True, pause_requested=True)
+                job["_paused_remaining"] = max(0, context["next_due"] - time.monotonic())
 
     def stop_job(self, job_id):
         with self.lock:
             job = self.jobs.get(job_id)
             if job is None:
                 raise FormError("Không tìm thấy lượt chạy.")
-            if job["status"] in ("queued", "running", "stopping"):
-                job.update(status="stopping")
-                if job.get("control"):
-                    job["control"].stop()
-                else:
-                    job["stop_event"].set()
+            active = job["status"] in ("queued", "running", "stopping")
+            if active:
+                job["control"].stop()
+                job["status"] = "stopping"
+                executing = job.get("_executing", False)
+            else:
+                executing = False
+        if active:
+            self.browser_queue.cancel(job_id)
+            if not executing:
+                self._finish_job(job, "stopped")
         return self.job_state(job_id)
 
     def pause_job(self, job_id, paused=True):
@@ -2419,8 +2575,20 @@ class WebApplication:
             job = self.jobs.get(job_id)
             if job is None or job["status"] not in ("queued", "running") or not job.get("control"):
                 raise FormError("Chỉ tạm dừng hoặc tiếp tục đợt đang hoạt động.")
-            job["pause_requested"] = paused
-            (job["control"].pause if paused else job["control"].resume)()
+            if paused != job["control"].paused:
+                if paused:
+                    job["_paused_remaining"] = max(0, job.get("_next_due", time.monotonic()) - time.monotonic())
+                    job["control"].pause()
+                else:
+                    job["control"].resume()
+                    due = time.monotonic() + job.pop("_paused_remaining", 0)
+                    job["_next_due"] = due
+                    if "_execution" in job:
+                        job["_execution"]["next_due"] = due
+                    self.browser_queue.reschedule(job_id, due_monotonic=due)
+            job.update(pause_requested=paused, paused=paused and not job.get("_executing", False),
+                       waiting=False if paused else job.get("_next_due", 0) > time.monotonic())
+        self.browser_queue.wake()
         return self.job_state(job_id, compact=True)
 
 
@@ -2463,6 +2631,9 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
     app = WebApplication(force_check=force_check, headless_only=settings["cloud"], key_store=key_store)
     access = AccessSessions(key_store)
     class Handler(BaseHTTPRequestHandler):
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(30)
         def log_message(self, *args):
             pass
 
@@ -2544,9 +2715,9 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     return
                 if path == "/api/state":
                     self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only,
-                                     "version": "8.0", "name": "KDautoform", "providers": ["google", "microsoft", "html"],
+                                     "version": "9.0", "name": "KDautoform", "providers": ["google", "microsoft", "html"],
                                      "spss_export": spss_available(), "csv_export": True, "scheduling": True,
-                                     "teaching_tools": True, "fast_google": True, "compact_poll": True, **self.access_state(session)})
+                                     "teaching_tools": True, "multiuser_queue": True, "browser_workers": app.browser_queue.capacity, "fast_google": True, "compact_poll": True, **self.access_state(session)})
                 elif path.startswith("/api/scans/"):
                     scan_id = path.rsplit("/", 1)[-1]
                     self.require_owner("scan", scan_id, session)
@@ -2605,6 +2776,14 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
             if not settings["cloud"]:
                 expected.update((f"http://127.0.0.1:{self.server.server_port}", f"http://localhost:{self.server.server_port}"))
             if self.headers.get("X-Local-Token") != app.token or (origin and origin not in expected):
+                # Drain small rejected bodies before closing, so Windows clients
+                # receive the 403 instead of an unread-body TCP reset.
+                try:
+                    rejected_length = int(self.headers.get("Content-Length", "0"))
+                    if 0 < rejected_length <= 65536:
+                        self.rfile.read(rejected_length)
+                except (ValueError, OSError):
+                    pass
                 self.reply(403, {"error": "Phiên truy cập không hợp lệ. Tải lại giao diện."})
                 return
             try:
@@ -2622,7 +2801,7 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     key = payload.get("key", "")
                     if not isinstance(key, str) or len(key) > 256:
                         raise FormError("Định dạng key không hợp lệ.")
-                    token, record, retry = access.login(key, self.client_address[0])
+                    token, record, retry = access.login(key, session["guest_id"])
                     if retry:
                         self.reply(429, {"error": f"Bạn đã nhập sai nhiều lần. Thử lại sau {retry} giây."},
                                    headers={"Retry-After": str(retry)})
@@ -2647,9 +2826,8 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                 if path == "/api/scan":
                     if self.access_state(session)["locked"]:
                         raise QuotaExceeded("Bạn đã dùng hết 10 lượt miễn phí. Mua key unlimited 30.000đ/key để tiếp tục.")
-                    result = app.scan(str(payload.get("url", "")), provider=payload.get("provider", "auto"))
-                    with app.lock:
-                        app.scans[result["scan_id"]]["owner_id"] = session["owner_id"]
+                    result = app.scan(str(payload.get("url", "")), provider=payload.get("provider", "auto"),
+                                      owner_id=session["owner_id"])
                     self.reply(202, result)
                 elif path.startswith("/api/scans/") and path.endswith("/preset"):
                     scan_id = path.split("/")[3]
@@ -2681,7 +2859,13 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                 self.reply(400, {"error": str(exc)})
             except (BrokenPipeError, ConnectionResetError):
                 pass
-    server = ThreadingHTTPServer((settings["host"], settings["port"]), Handler)
+    class WebServer(ThreadingHTTPServer):
+        daemon_threads = True
+        request_queue_size = 128
+        def server_close(self):
+            app.close()
+            super().server_close()
+    server = WebServer((settings["host"], settings["port"]), Handler)
     server.application = app
     server.settings = settings
     return server

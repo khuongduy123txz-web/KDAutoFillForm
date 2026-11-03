@@ -14,7 +14,7 @@ python google_form_tool.py --web
 
 Mở http://127.0.0.1:8765 để vào thẳng trang chủ và dùng miễn phí 10 lượt gửi, không cần key. Dùng `--web --check` để kiểm tra mọi trang mà chưa gửi phản hồi. Khi cần mở khóa không giới hạn lượt, chủ công cụ tạo key bằng `python google_form_tool.py --key-generate`.
 
-Giữ các file `google_form_tool.py`, `google_fast.py`, `microsoft_forms.py`, `html_forms.py`, `spss_export.py`, `run_scheduling.py`, `teaching_tools.py` và `requirements.txt` cùng thư mục. `--setup` cài các thư viện trong requirements cùng Chromium; không chỉ sao chép riêng file Python chính sang máy khác.
+Giữ các file `google_form_tool.py`, `google_fast.py`, `form_scanning.py`, `work_queue.py`, `microsoft_forms.py`, `html_forms.py`, `spss_export.py`, `run_scheduling.py`, `teaching_tools.py` và `requirements.txt` cùng thư mục. `--setup` cài các thư viện trong requirements cùng Chromium; không chỉ sao chép riêng file Python chính sang máy khác.
 
 ## Chọn loại biểu mẫu
 
@@ -94,16 +94,35 @@ Trong phần tốc độ trên web, chọn một cấu hình nhanh hoặc đặt
 | Mỗi 3 phút | Cố định 180 giây giữa các lần bắt đầu. |
 | Tùy chỉnh | Cố định hoặc ngẫu nhiên trong khoảng 0–86.400 giây. |
 
-**Khoảng cách được tính từ lúc bắt đầu lượt trước đến lúc bắt đầu lượt sau.** Lượt đầu chạy ngay. Công cụ chỉ chạy lần lượt: nếu một form mất lâu hơn khoảng cách đã đặt, lượt kế tiếp chờ form đó hoàn tất. Không chạy chồng nhiều trình duyệt và không dồn các lượt để bù thời gian bị trễ. Thời gian hoàn thành hiển thị là ước tính; tốc độ mạng và độ dài form có thể làm thời gian thực tế lớn hơn.
+**Khoảng cách được tính từ lúc bắt đầu lượt trước đến lúc bắt đầu lượt sau.** Mỗi người dùng chạy lần lượt; lượt đầu bắt đầu khi đến vị trí trong hàng đợi: nếu một form mất lâu hơn khoảng cách đã đặt, lượt kế tiếp chờ form đó hoàn tất. Không dồn các lượt của cùng một đợt để bù thời gian bị trễ. Các người dùng khác được chia lượt xử lý theo hàng đợi. Thời gian hoàn thành hiển thị là ước tính; tốc độ mạng và độ dài form có thể làm thời gian thực tế lớn hơn.
 
 Ví dụ muốn nhịp **1 phút/form**, chọn cấu hình **1 phút / 60 giây**. Muốn “30 giây–3 phút mới có một phản hồi mới”, chọn cấu hình ngẫu nhiên 30–180 giây. Đây là nhịp bắt đầu lượt; không bảo đảm biểu mẫu dài sẽ hoàn thành trong 30 giây.
 
-- **Tạm dừng** giữ lượt hiện tại để tiếp tục. Công cụ dừng ở các điểm kiểm tra giữa câu hỏi và ngay trước khi gửi; một yêu cầu mạng đã bắt đầu có thể hoàn tất trước khi tạm dừng có hiệu lực.
-- **Tiếp tục** đi tiếp từ vị trí tạm dừng. Nếu đang chờ đến lượt sau, phần thời gian chờ còn lại được giữ khi tạm dừng.
+- **Tạm dừng** đóng phiên điền chưa gửi để nhường tài nguyên cho người khác. Khi tiếp tục, công cụ điền lại phản hồi đó với cùng đáp án, seed và hồ sơ; lượt chưa gửi được hoàn ngay nếu đã giữ chỗ. Một yêu cầu gửi đã bắt đầu vẫn có thể hoàn tất trước khi tạm dừng có hiệu lực.
+- **Tiếp tục** đưa đợt chạy trở lại hàng đợi. Nếu đang chờ đến lượt sau, phần thời gian chờ còn lại được giữ khi tạm dừng.
 - **Dừng** kết thúc đợt chạy. Các phản hồi đã được xác nhận vẫn xem và tải được.
 - Đọc form, chờ theo lịch hoặc tạm dừng không tự trừ lượt miễn phí. Hạn mức chỉ giảm ngay trước thao tác gửi như trước.
 
 Đợt chạy và lịch hiện tại nằm trong RAM của máy chủ. Render Free có thể ngủ hoặc khởi động lại; công cụ không bảo đảm lịch chạy dài hay chạy qua đêm sẽ tự tiếp tục sau restart. Giữ nhật ký và kiểm tra phản hồi đã lưu trước khi bắt đầu lại.
+
+## Nhiều người dùng cùng lúc
+
+Mỗi người có phiên, form, cấu hình tỷ lệ, hàng đợi và kết quả riêng. Người A đang điền không chặn người B đọc Google Forms và tạo đợt chạy. Mỗi trình duyệt/phiên được giữ một đợt đang hoạt động để tránh bấm trùng; số người truy cập không bị khóa bởi một bộ đếm người dùng chung.
+
+Công việc điền được chia theo **từng phản hồi**: A1 → B1 → A2 khi cả A và B đang chờ. Lượt theo lịch 1 phút hoặc đang tạm dừng nhường tài nguyên cho người khác. Giao diện hiển thị **Đang xếp hàng** và vị trí; đợi/hủy hàng không trừ lượt miễn phí. Phản hồi chưa được máy chủ nguồn xác nhận không được tự gửi lại.
+
+Google Forms được đọc bằng GET lấy metadata, không cần mở Chromium chỉ để xem câu hỏi. Microsoft Forms và HTML dùng hàng đợi trình duyệt riêng cùng các lượt điền, giữ bộ xử lý hiện có. Trên Render Free, cấu hình mặc định:
+
+| Biến môi trường | Mặc định | Ý nghĩa |
+| --- | ---: | --- |
+| `KD_BROWSER_WORKERS` | 1 | Số tác vụ trình duyệt đồng thời, dùng chung cho toàn máy chủ. |
+| `KD_SCAN_WORKERS` | 2 | Số tác vụ đọc metadata Google đồng thời. |
+
+Hai biến nằm trong `render.yaml`; có thể đặt trong Render → **Environment**. Với máy chủ có nhiều RAM hơn, tăng `KD_BROWSER_WORKERS` lên 2 rồi theo dõi RAM/CPU. Cấu hình nhận 1–8 worker; tăng số này không tự cấp thêm tài nguyên. Chromium được tái sử dụng theo worker, còn context/cookie của mỗi phản hồi được tạo mới. Số worker không tăng theo số người chờ.
+
+**Không có máy chủ miễn phí phục vụ vô hạn người cùng thời điểm.** Hàng đợi giúp nhiều người cùng sử dụng mà không bị lỗi khóa chung; khi tải cao, thời gian chờ tăng. [Render Free chỉ có một instance và không hỗ trợ mở rộng nhiều instance](https://render.com/docs/free); [autoscaling cần gói và tài nguyên phù hợp](https://render.com/docs/scaling). Bản hiện tại dùng một tiến trình ứng dụng; không tăng số replica/WEB_CONCURRENCY vì phiên và hàng đợi chưa được chia sẻ giữa nhiều tiến trình.
+
+Kết quả đợt hoàn tất được giữ tối đa 24 giờ; form đã đọc không còn dùng bởi đợt hoạt động được giữ khoảng 1 giờ, dọn khi có lần đọc mới. Hàng đợi, tiến độ và nhật ký tạm vẫn có thể mất khi Render ngủ/restart/deploy. Key và hạn mức miễn phí tiếp tục được lưu trong PostgreSQL. Tải kết quả trước khi khởi động lại dịch vụ.
 
 ## Công cụ thực hành thống kê
 
@@ -173,8 +192,8 @@ Repository đã có remote `origin` và nhánh `main`:
 ```powershell
 cd C:\Users\DELL\Desktop\toolggform
 git status --short
-git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py google_fast.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_google_speed.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py tests/test_performance.py tests/test_run_scheduling.py tests/test_teaching_tools.py tests/test_workflow.py
-git commit -m "Speed up Google Forms and add one minute pacing"
+git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py google_fast.py form_scanning.py work_queue.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_google_speed.py tests/test_form_scanning.py tests/test_work_queue.py tests/test_multiuser.py tests/test_multiuser_browser.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py tests/test_performance.py tests/test_run_scheduling.py tests/test_teaching_tools.py tests/test_workflow.py
+git commit -m "Support isolated multi-user scans and fair response queues"
 git push origin main
 ```
 

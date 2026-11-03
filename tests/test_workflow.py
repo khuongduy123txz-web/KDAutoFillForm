@@ -67,6 +67,7 @@ class WorkflowTests(unittest.TestCase):
             mock.start()
             self.addCleanup(mock.stop)
         self.addCleanup(lambda: [job["control"].stop() for job in self.app.jobs.values()])
+        self.addCleanup(self.app.close)
 
     def payload(self, **overrides):
         return {"scan_id": "scan", "count": 2, "config": self.app.scans["scan"]["config"], "delay": 0,
@@ -179,7 +180,7 @@ class WorkflowTests(unittest.TestCase):
             release.set()
             self.wait(lambda: job["paused"])
             self.assertEqual(self.submits, [])
-            self.assertEqual(self.store.guest_usage(self.guest, fresh=True)["used"], 1)
+            self.assertEqual(self.store.guest_usage(self.guest, fresh=True)["used"], 0)
             self.app.stop_job(job["id"])
             self.wait(lambda: job["status"] == "stopped")
         self.assertEqual(self.submits, [])

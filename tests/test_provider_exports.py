@@ -84,10 +84,13 @@ class ProviderExportTests(unittest.TestCase):
     def test_scan_dispatches_selected_provider_and_keeps_guest_ownership(self):
         app = self.server.application
         app.scans["mock"] = {"id": "mock", "status": "scanning"}
-        with patch.object(app, "scan", return_value={"scan_id": "mock"}) as scan:
+        def queued_scan(url, provider, owner_id):
+            app.scans["mock"]["owner_id"] = owner_id
+            return {"scan_id": "mock"}
+        with patch.object(app, "scan", side_effect=queued_scan) as scan:
             status, _, _ = self.request("POST", "/api/scan", {"url": "https://survey.example/survey", "provider": "html"})
         self.assertEqual(status, 202)
-        scan.assert_called_once_with("https://survey.example/survey", provider="html")
+        scan.assert_called_once_with("https://survey.example/survey", provider="html", owner_id=self.owner)
         self.assertEqual(app.scans["mock"]["owner_id"], self.owner)
         self.assertEqual(self.store.guest_usage(self.owner)["used"], 0)
 
@@ -117,12 +120,29 @@ class ProviderExportTests(unittest.TestCase):
         self.seed_job()
         app = self.server.application
         self.assertTrue(app.export_lock.acquire(blocking=False))
-        try:
-            status, _, body = self.request("GET", "/api/jobs/test-job/export.sav")
-            self.assertEqual(status, 400)
-            self.assertIn("SPSS", json.loads(body)["error"])
-        finally:
-            app.export_lock.release()
+        entered, completed = threading.Event(), threading.Event()
+        results = []
+        original = app.export_job
+        def exporting(*args, **kwargs):
+            entered.set()
+            return original(*args, **kwargs)
+        def download():
+            try:
+                results.append(self.request("GET", "/api/jobs/test-job/export.zip"))
+            finally:
+                completed.set()
+        with patch.object(app, "export_job", side_effect=exporting):
+            thread = threading.Thread(target=download, daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertFalse(completed.wait(.05))
+            finally:
+                app.export_lock.release()
+            self.assertTrue(completed.wait(3))
+            thread.join(timeout=1)
+        self.assertEqual(results[0][0], 200)
+        self.assertEqual(self.store.guest_usage(self.owner, fresh=True)["used"], 0)
 
     def test_csv_bundle_and_report_keep_confirmed_counts_and_ownership(self):
         import io
