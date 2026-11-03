@@ -1678,7 +1678,7 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <div><label class="label" for="intervalMax">Đến (giây)</label><input id="intervalMax" type="number" min="0" max="86400" step="1" value="2" disabled></div>
 <div><label class="label" for="sampleSeed">Seed tái tạo dữ liệu</label><input id="sampleSeed" type="number" min="0" max="9007199254740991" step="1" placeholder="Để trống: ngẫu nhiên"></div>
 <div><label class="label" for="referenceDate">Ngày tham chiếu</label><input id="referenceDate" type="date" min="1900-01-01" max="2100-12-31"></div></div>
-<p class="run-hint">Lượt đầu bắt đầu khi đến lượt trong hàng đợi. Khoảng gửi tính giữa hai lần bắt đầu; form dài sẽ được điền xong trước khi chạy lượt tiếp theo.</p><p class="run-hint">Thời gian hoàn tất phụ thuộc form và mạng. Nhịp 2 giây không bảo đảm điền xong trong 2 giây. Giữ cùng seed, cấu hình và ngày tham chiếu để lặp lại dữ liệu.</p><p id="durationEstimate" class="duration-estimate" aria-live="polite"></p><p id="runOptionsError" class="quantity-error" role="status" hidden></p></details>
+<p class="run-hint">Lượt đầu bắt đầu khi đến lượt trong hàng đợi. Khoảng gửi tính giữa hai lần bắt đầu; form dài sẽ được điền xong trước khi chạy lượt tiếp theo.</p><p class="run-hint">Thời gian hoàn tất phụ thuộc form và mạng. Nhịp 2 giây không bảo đảm điền xong trong 2 giây. Giữ cùng seed, cấu hình và ngày tham chiếu để lặp lại dữ liệu.</p><p id="serverCapacity" class="run-hint" role="status"></p><p id="durationEstimate" class="duration-estimate" aria-live="polite"></p><p id="runOptionsError" class="quantity-error" role="status" hidden></p></details>
 </section>
 <div class="workspace">
 <section class="questions" aria-labelledby="ratioTitle">
@@ -1802,7 +1802,7 @@ $("loadReport").addEventListener("click",async()=>{if(!state.job?.confirmed)retu
 async function downloadResult(event,kind){event.preventDefault();const link=event.currentTarget;if(link.getAttribute("aria-busy")==="true")return;link.setAttribute("aria-busy","true");const jobId=state.job.id,href=link.href;try{const response=await fetch(href);if(!response.ok){let info={};try{info=await response.json()}catch{}throw Error(info.error||"Chưa xuất được dữ liệu.")}const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="KDautoform_"+jobId+"."+kind;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast(kind==="sav"?"Đã tải .sav. Mở trong SPSS bằng File → Open → Data.":"Đã tải CSV, bảng mã và báo cáo trong file ZIP.")}catch(error){toast(error.message)}finally{link.removeAttribute("aria-busy")}}
 $("downloadSpss").addEventListener("click",event=>downloadResult(event,"sav"));$("downloadCsv").addEventListener("click",event=>downloadResult(event,"zip"));
 $("startButton").addEventListener("click",async()=>{if(activeJob()){try{state.job=await api("/api/jobs/"+state.job.id+"/stop",{});renderJob()}catch(error){toast(error.message)}}else if(state.access?.locked){openKeyModal()}else startJob(false)});
-async function init(){restoreRunOptions();const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";selectProvider(providerFromLink($("formUrl").value)||localStorage.getItem("formpilot.provider")||"google");try{const info=await api("/api/state");state.forceCheck=info.force_check;state.spssAvailable=Boolean(info.spss_export);state.csvAvailable=Boolean(info.csv_export);if(info.plan!=="unlimited"&&(quantity()===null||quantity()===0||quantity()>info.remaining))$("quantity").value=Math.max(1,info.remaining);$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ. Vui lòng tải lại trang.","error");$("usageDetail").textContent="Chưa kết nối được máy chủ. Vui lòng thử tải lại trang."}renderSummary()}
+async function init(){restoreRunOptions();const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";selectProvider(providerFromLink($("formUrl").value)||localStorage.getItem("formpilot.provider")||"google");try{const info=await api("/api/state");state.forceCheck=info.force_check;$("serverCapacity").textContent="Máy chủ xử lý tối đa "+info.browser_workers+" phản hồi cùng lúc; các lượt còn lại tự xếp hàng.";state.spssAvailable=Boolean(info.spss_export);state.csvAvailable=Boolean(info.csv_export);if(info.plan!=="unlimited"&&(quantity()===null||quantity()===0||quantity()>info.remaining))$("quantity").value=Math.max(1,info.remaining);$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ. Vui lòng tải lại trang.","error");$("usageDetail").textContent="Chưa kết nối được máy chủ. Vui lòng thử tải lại trang."}renderSummary()}
 let keyReturnFocus=null;
 function applyAccess(info){
 const previous=state.access;state.access={plan:info.plan,remaining:info.remaining,used:info.used,free_limit:info.free_limit,locked:info.locked,key_name:info.key_name};
@@ -2060,13 +2060,18 @@ class WebApplication:
         import threading
         from work_queue import TaskDispatcher
         def workers(value, variable, default):
+            raw = os.environ.get(variable, default) if value is None else value
             try:
-                result = int(os.environ.get(variable, default) if value is None else value)
+                if type(raw) is not int and not (isinstance(raw, str) and re.fullmatch(r"[0-9]+", raw.strip())):
+                    raise ValueError()
+                result = int(raw)
             except (TypeError, ValueError) as exc:
-                raise FormError(variable + " cần là số nguyên từ 1 đến 8.") from exc
-            if not 1 <= result <= 8:
-                raise FormError(variable + " cần là số nguyên từ 1 đến 8.")
+                raise FormError(variable + " cần là số nguyên từ 1 đến 10.") from exc
+            if not 1 <= result <= 10:
+                raise FormError(variable + " cần là số nguyên từ 1 đến 10.")
             return result
+        browser_capacity = workers(browser_workers, "KD_BROWSER_WORKERS", 1)
+        scan_capacity = workers(scan_workers, "KD_SCAN_WORKERS", 2)
         self.key_store = key_store or configured_key_store()
         self.headless_only = headless_only
         self.lock = threading.RLock()
@@ -2077,9 +2082,9 @@ class WebApplication:
         self._closing = False
         self._last_cleanup = 0
         self._browser_local = threading.local()
-        self.browser_queue = TaskDispatcher(workers(browser_workers, "KD_BROWSER_WORKERS", 1),
+        self.browser_queue = TaskDispatcher(browser_capacity,
                                             name="kd-browser", on_worker_exit=self._close_worker_browser)
-        self.scan_queue = TaskDispatcher(workers(scan_workers, "KD_SCAN_WORKERS", 2), name="kd-metadata")
+        self.scan_queue = TaskDispatcher(scan_capacity, name="kd-metadata")
 
     def _close_worker_browser(self):
         launcher = getattr(self._browser_local, "launcher", None)
@@ -2715,7 +2720,7 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     return
                 if path == "/api/state":
                     self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only,
-                                     "version": "9.0", "name": "KDautoform", "providers": ["google", "microsoft", "html"],
+                                     "version": "9.1", "max_browser_workers": 10, "name": "KDautoform", "providers": ["google", "microsoft", "html"],
                                      "spss_export": spss_available(), "csv_export": True, "scheduling": True,
                                      "teaching_tools": True, "multiuser_queue": True, "browser_workers": app.browser_queue.capacity, "fast_google": True, "compact_poll": True, **self.access_state(session)})
                 elif path.startswith("/api/scans/"):

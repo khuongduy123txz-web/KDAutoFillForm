@@ -118,7 +118,38 @@ Google Forms được đọc bằng GET lấy metadata, không cần mở Chromi
 | `KD_BROWSER_WORKERS` | 1 | Số tác vụ trình duyệt đồng thời, dùng chung cho toàn máy chủ. |
 | `KD_SCAN_WORKERS` | 2 | Số tác vụ đọc metadata Google đồng thời. |
 
-Hai biến nằm trong `render.yaml`; có thể đặt trong Render → **Environment**. Với máy chủ có nhiều RAM hơn, tăng `KD_BROWSER_WORKERS` lên 2 rồi theo dõi RAM/CPU. Cấu hình nhận 1–8 worker; tăng số này không tự cấp thêm tài nguyên. Chromium được tái sử dụng theo worker, còn context/cookie của mỗi phản hồi được tạo mới. Số worker không tăng theo số người chờ.
+Hai biến nằm trong `render.yaml`; có thể đặt trong Render → **Environment**. Với máy chủ có nhiều RAM hơn, tăng `KD_BROWSER_WORKERS` lên 2 rồi theo dõi RAM/CPU. Cấu hình nhận 1–10 worker; tăng số này không tự cấp thêm tài nguyên. Chromium được tái sử dụng theo worker, còn context/cookie của mỗi phản hồi được tạo mới. Số worker không tăng theo số người chờ.
+
+### Tối đa 10 người xử lý đồng thời
+
+Đặt `KD_BROWSER_WORKERS=10` trên máy chủ đủ tài nguyên. Mỗi người có tối đa một đợt đang hoạt động; mười worker xử lý tối đa mười phản hồi đồng thời. Người thứ 11 trở đi chờ FIFO (đến trước được xử lý trước), tự vào khi có chỗ trống. Hủy/chờ không trừ lượt miễn phí; sau mỗi phản hồi, đợt dài nhường lượt cho các yêu cầu khác đang chờ.
+
+Ví dụ chạy trên máy cá nhân có đủ RAM:
+
+```powershell
+cd C:\Users\DELL\Desktop\toolggform
+$env:KD_BROWSER_WORKERS="10"
+python google_form_tool.py --web
+```
+
+Đây là web trên máy cá nhân; để người ngoài mạng sử dụng cần thêm endpoint/tunnel công khai và máy phải luôn bật. Trên Render, chỉ đổi Environment sang 10 sau khi đã có máy chủ đủ RAM. `render.yaml` hiện vẫn giữ 1 worker cho gói Free.
+
+Phép đo tài nguyên với 10 Chromium độc lập và form HTML mô phỏng 40 ô đã dùng khoảng **1.975 MiB RAM**, ngay cả khi không tải Google qua mạng. Bởi vậy gói Free 512 MB không phù hợp cho 10 worker. Máy chủ một instance khoảng 4 GB RAM/2 CPU là điểm bắt đầu để kiểm thử tải thực tế; nhu cầu thật phụ thuộc form. Không tự đổi sang gói trả phí chỉ bằng thay biến worker.
+
+Bài kiểm tra Chromium thực tế trên Docker 4 GB/2 CPU đã chuẩn bị đồng thời 10 form, tự đưa người 11/12 vào FIFO, đi đủ 4 trang/40 câu cho cả 12 phản hồi với dữ liệu POST mô phỏng chính xác. RAM cao nhất khoảng **1.835 MiB**; đây là fixture mạng mô phỏng, không phải bảo đảm tốc độ/độ ổn định của mọi form Google thật.
+
+Kiểm tra logic 10 người và thứ tự người 11/12:
+
+```powershell
+python -B -m unittest discover -s tests -p test_ten_users.py -v
+```
+
+Bài kiểm tra 10 Chromium thật yêu cầu máy đủ RAM và mặc định được bỏ qua trong bộ kiểm tra 512 MB. Bật riêng trên máy có ít nhất khoảng 4 GB dành cho tiến trình kiểm thử:
+
+```powershell
+$env:KD_TEN_BROWSER_TESTS="1"
+python -B -m unittest discover -s tests -p test_ten_users_browser.py -v
+```
 
 **Không có máy chủ miễn phí phục vụ vô hạn người cùng thời điểm.** Hàng đợi giúp nhiều người cùng sử dụng mà không bị lỗi khóa chung; khi tải cao, thời gian chờ tăng. [Render Free chỉ có một instance và không hỗ trợ mở rộng nhiều instance](https://render.com/docs/free); [autoscaling cần gói và tài nguyên phù hợp](https://render.com/docs/scaling). Bản hiện tại dùng một tiến trình ứng dụng; không tăng số replica/WEB_CONCURRENCY vì phiên và hàng đợi chưa được chia sẻ giữa nhiều tiến trình.
 
@@ -192,7 +223,7 @@ Repository đã có remote `origin` và nhánh `main`:
 ```powershell
 cd C:\Users\DELL\Desktop\toolggform
 git status --short
-git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py google_fast.py form_scanning.py work_queue.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_google_speed.py tests/test_form_scanning.py tests/test_work_queue.py tests/test_multiuser.py tests/test_multiuser_browser.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py tests/test_performance.py tests/test_run_scheduling.py tests/test_teaching_tools.py tests/test_workflow.py
+git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py google_fast.py form_scanning.py work_queue.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_google_speed.py tests/test_form_scanning.py tests/test_work_queue.py tests/test_multiuser.py tests/test_multiuser_browser.py tests/test_ten_users.py tests/test_ten_users_browser.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py tests/test_performance.py tests/test_run_scheduling.py tests/test_teaching_tools.py tests/test_workflow.py
 git commit -m "Support isolated multi-user scans and fair response queues"
 git push origin main
 ```
