@@ -31,9 +31,12 @@ LEGACY_ACCESS_KEYS = {'khach-01': {'sha256': '79d5a508a85cae8564283f6fb0457d53fa
               'enabled': True}}
 
 # KHO KEY: đổi đường dẫn mặc định tại đây, hoặc đặt KD_KEY_DB_PATH / KD_KEY_EXPORT_DIR trong .env.
-# data/access_keys.sqlite3 lưu mã băm + trạng thái đã dùng; private_keys/*.csv chứa KEY THẬT để bạn cấp cho khách.
+# data/access_keys.sqlite3 lưu mã băm + trạng thái key; private_keys/*.csv chứa KEY THẬT để bạn cấp cho khách.
 KEY_DB_PATH = Path(__file__).resolve().parent / "data" / "access_keys.sqlite3"
 KEY_EXPORT_DIR = Path(__file__).resolve().parent / "private_keys"
+
+# HẠN MỨC MIỄN PHÍ: số lần gửi tối đa cho mỗi cookie trình duyệt, lưu trong CSDL.
+FREE_LIMIT = 10
 
 
 class FormError(Exception):
@@ -286,6 +289,10 @@ class KeyAlreadyUsed(FormError):
     pass
 
 
+class QuotaExceeded(FormError):
+    pass
+
+
 def load_local_key_environment():
     path = Path(__file__).resolve().parent / ".env"
     if not path.is_file():
@@ -373,6 +380,14 @@ class KeyStore:
                     self.execute(connection, "ALTER TABLE kd_access_keys ADD COLUMN activated_at DOUBLE PRECISION")
                 if "activation_id" not in columns:
                     self.execute(connection, "ALTER TABLE kd_access_keys ADD COLUMN activation_id TEXT")
+            if self.database_url:
+                self.execute(connection, "ALTER TABLE kd_access_keys ADD COLUMN IF NOT EXISTS unlimited INTEGER NOT NULL DEFAULT 0")
+            elif "unlimited" not in columns:
+                self.execute(connection, "ALTER TABLE kd_access_keys ADD COLUMN unlimited INTEGER NOT NULL DEFAULT 0")
+            self.execute(connection, """CREATE TABLE IF NOT EXISTS kd_guest_usage (
+                guest_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0,
+                created_at DOUBLE PRECISION NOT NULL
+            )""")
             self.execute(connection, "CREATE TABLE IF NOT EXISTS kd_key_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
             inserted = self.execute(connection,
                 "INSERT INTO kd_key_meta (name, value) VALUES (?, ?) ON CONFLICT (name) DO NOTHING",
@@ -382,6 +397,11 @@ class KeyStore:
                     self.execute(connection,
                         "INSERT INTO kd_access_keys (name, sha256, enabled, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
                         (name, item["sha256"], int(item["enabled"]), time.time()))
+            migrated = self.execute(connection,
+                "INSERT INTO kd_key_meta (name, value) VALUES (?, ?) ON CONFLICT (name) DO NOTHING",
+                ("unlimited_keys_v1", "1")).rowcount
+            if migrated:
+                self.execute(connection, "UPDATE kd_access_keys SET unlimited = 1 WHERE activated_at IS NULL AND claimed_job IS NULL")
 
     def description(self):
         return "PostgreSQL (biến KD_DATABASE_URL)" if self.database_url else str(self.path)
@@ -405,7 +425,7 @@ class KeyStore:
     def unused_by_hash(self, digest):
         with self.connection() as connection:
             row = self.execute(connection,
-                "SELECT * FROM kd_access_keys WHERE sha256 = ? AND enabled = 1 AND claimed_job IS NULL AND activated_at IS NULL AND activation_id IS NULL",
+                "SELECT * FROM kd_access_keys WHERE sha256 = ? AND enabled = 1 AND unlimited = 1",
                 (digest,)).fetchone()
         return dict(row) if row else None
 
@@ -428,11 +448,11 @@ class KeyStore:
                 if rotate:
                     cursor = self.execute(connection, """UPDATE kd_access_keys SET sha256 = ?, enabled = 1,
                         created_at = ?, claimed_at = NULL, claimed_job = NULL, finished_at = NULL, outcome = NULL,
-                        activated_at = NULL, activation_id = NULL
+                        activated_at = NULL, activation_id = NULL, unlimited = 1
                         WHERE name = ?""", (access_key_hash(record["key"]), record["created_at"], record["name"]))
                 else:
                     cursor = self.execute(connection,
-                        "INSERT INTO kd_access_keys (name, sha256, enabled, created_at) VALUES (?, ?, 1, ?) ON CONFLICT DO NOTHING",
+                        "INSERT INTO kd_access_keys (name, sha256, enabled, created_at, unlimited) VALUES (?, ?, 1, ?, 1) ON CONFLICT DO NOTHING",
                         (record["name"], access_key_hash(record["key"]), record["created_at"]))
                 if cursor.rowcount != 1:
                     raise FormError("Không tạo/đổi được tên key: " + record["name"] + ". Kiểm tra tên đã tồn tại hoặc đã bị xóa.")
@@ -456,12 +476,11 @@ class KeyStore:
         self.clear_cache()
 
     def activate(self, digest, activation_id):
-        # CHỈ DÙNG MỘT LẦN: key được tiêu thụ ngay khi kích hoạt, kể cả khi chưa bắt đầu chạy form.
+        # KEY UNLIMITED: đăng nhập lại được; khóa/xóa/đổi key sẽ thu hồi quyền sử dụng.
         with self.connection() as connection:
             cursor = self.execute(connection, """UPDATE kd_access_keys
-                SET activated_at = ?, activation_id = ?, outcome = 'activated'
-                WHERE sha256 = ? AND enabled = 1 AND claimed_job IS NULL
-                AND activated_at IS NULL AND activation_id IS NULL""", (time.time(), activation_id, digest))
+                SET activated_at = COALESCE(activated_at, ?), activation_id = ?, outcome = 'activated'
+                WHERE sha256 = ? AND enabled = 1 AND unlimited = 1""", (time.time(), activation_id, digest))
             row = self.execute(connection, "SELECT * FROM kd_access_keys WHERE sha256 = ?", (digest,)).fetchone() if cursor.rowcount == 1 else None
         self.clear_cache()
         return dict(row) if row else None
@@ -469,12 +488,33 @@ class KeyStore:
     def claim(self, name, digest, job_id, activation_id):
         with self.connection() as connection:
             cursor = self.execute(connection, """UPDATE kd_access_keys SET claimed_at = ?, claimed_job = ?, outcome = 'running'
-                WHERE name = ? AND sha256 = ? AND enabled = 1 AND claimed_job IS NULL
-                AND activated_at IS NOT NULL AND activation_id = ?""",
-                (time.time(), job_id, name, digest, activation_id))
+                WHERE name = ? AND sha256 = ? AND enabled = 1 AND unlimited = 1""",
+                (time.time(), job_id, name, digest))
             if cursor.rowcount != 1:
-                raise KeyAlreadyUsed("Key đã được dùng cho một đợt chạy, đã bị khóa hoặc đã thay đổi. Vui lòng nhập key mới.")
+                raise KeyAlreadyUsed("Key đã bị khóa, đã thay đổi hoặc là key một lần của phiên bản cũ.")
         self.clear_cache()
+
+    def ensure_guest(self, guest_id):
+        with self.connection() as connection:
+            self.execute(connection, """INSERT INTO kd_guest_usage (guest_id, used, created_at)
+                VALUES (?, 0, ?) ON CONFLICT (guest_id) DO NOTHING""", (guest_id, time.time()))
+        return self.guest_usage(guest_id)
+
+    def guest_usage(self, guest_id):
+        with self.connection() as connection:
+            row = self.execute(connection, "SELECT used FROM kd_guest_usage WHERE guest_id = ?", (guest_id,)).fetchone()
+        if row is None:
+            return None
+        return {"limit": FREE_LIMIT, "used": row["used"], "remaining": max(0, FREE_LIMIT - row["used"])}
+
+    def consume_guest(self, guest_id):
+        # TRỪ LƯỢT: ghi bền vững NGAY TRƯỚC khi bấm Gửi; lỗi xác nhận vẫn tính một lần gửi.
+        with self.connection() as connection:
+            cursor = self.execute(connection, "UPDATE kd_guest_usage SET used = used + 1 WHERE guest_id = ? AND used < ?",
+                                  (guest_id, FREE_LIMIT))
+            if cursor.rowcount != 1:
+                raise QuotaExceeded("Bạn đã dùng hết 10 lượt miễn phí. Mua key unlimited 30.000đ/key để tiếp tục.")
+        return self.guest_usage(guest_id)
 
     def finish(self, name, digest, job_id, outcome):
         with self.connection() as connection:
@@ -508,10 +548,8 @@ def manage_access_keys(args):
     if args.key_list:
         rows = store.list()
         for item in rows:
-            used = item["activated_at"] is not None or bool(item["claimed_job"])
-            status = "KHÓA" if not item["enabled"] else "ĐÃ DÙNG" if used else "CHƯA DÙNG"
-            count = "1/1" if used else "0/1"
-            print(f'{item["name"]}: {status} · {count}' + (f' · {item["outcome"]}' if item["outcome"] else ""))
+            status = "KHÓA" if not item["enabled"] else "UNLIMITED" if item["unlimited"] else "KEY CŨ ĐÃ DÙNG"
+            print(f'{item["name"]}: {status}' + (f' · {item["outcome"]}' if item["outcome"] else ""))
         if not rows:
             print("Chưa có key. Tạo bằng --key-generate 1.")
         return 0
@@ -527,7 +565,7 @@ def manage_access_keys(args):
     else:
         name = (args.key_delete or args.key_disable or args.key_enable).strip()
         store.change(name, delete=bool(args.key_delete), enabled=bool(args.key_enable))
-        print("Đã cập nhật: " + name + ". Mở khóa không khôi phục lượt đã dùng.")
+        print("Đã cập nhật: " + name + ". Key unlimited dùng lại được khi đang mở khóa.")
         return 0
     for record in records:
         print(f'Tên: {record["name"]}\nKEY: {record["key"]}')
@@ -579,14 +617,13 @@ class AccessSessions:
         if not record:
             return None
         item = self.key_store.get(record["key_id"])
-        valid = (record["expires"] > time.time() and item and item["enabled"]
-                 and secrets.compare_digest(item["sha256"], record["key_hash"])
-                 and secrets.compare_digest(str(item["activation_id"] or ""), record["activation_id"]))
+        valid = (record["expires"] > time.time() and item and item["enabled"] and item["unlimited"]
+                 and secrets.compare_digest(item["sha256"], record["key_hash"]))
         if not valid:
             with self.lock:
                 self.sessions.pop(token, None)
             return None
-        return {**record, "key_used": bool(item["claimed_job"]), "key_job_id": item["claimed_job"]}
+        return {**record, "key_used": False, "key_job_id": item["claimed_job"]}
 
     def logout(self, cookie_header):
         from http.cookies import SimpleCookie, CookieError
@@ -601,15 +638,13 @@ class AccessSessions:
 
 
 def active_job_key(job, key_store=None):
+    store = key_store or configured_key_store()
     name = job.get("access_key_id")
     if not name:
-        return False
-    item = (key_store or configured_key_store()).get(name)
-    valid = bool(item and item["enabled"] and secrets.compare_digest(item["sha256"], job["access_key_hash"])
-                 and secrets.compare_digest(str(item["activation_id"] or ""), job.get("access_activation_id", "")))
-    if not valid:
-        return False
-    return item["claimed_job"] == job["id"] if job["mode"] == "send" else not item["claimed_job"]
+        return bool(job.get("guest_id") and store.guest_usage(job["guest_id"]) is not None)
+    item = store.get(name)
+    return bool(item and item["enabled"] and item["unlimited"]
+                and secrets.compare_digest(item["sha256"], job["access_key_hash"]))
 
 
 
@@ -1389,6 +1424,7 @@ WEB_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light">
+<meta name="description" content="KDautoform: điền Google Form với dữ liệu mô phỏng, tùy chỉnh tỷ lệ, 10 lượt miễn phí. Mở khóa unlimited 30.000đ/key.">
 <title>KDautoform — Điền form theo tỷ lệ của bạn</title>
 <style>
 :root{--red:#c52c38;--red-deep:#a71e2a;--red-soft:#fff0ef;--ink:#282128;--muted:#776870;--line:#eee6e6;--paper:#fff;--canvas:#fbf8f7;--green:#236f58;--radius:20px}
@@ -1410,9 +1446,14 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 
 .access-locked .skip-link{display:none}.access-gate{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:35px 20px;background:radial-gradient(ellipse at 50% 0%,#fce9e5 0%,transparent 55%),var(--canvas)}.access-card{width:100%;max-width:460px;border:1px solid #ecdfe0;border-radius:24px;background:#fff;padding:36px 36px 29px;box-shadow:0 18px 70px #70414b0b}.access-brand{display:flex;align-items:center;justify-content:center;gap:11px;color:var(--red);font-size:26px;letter-spacing:-1px;margin-bottom:30px}.access-badge{display:flex;justify-content:center;align-items:center;gap:6px;color:#966572;font-size:10px;font-weight:700;letter-spacing:1.1px}.access-badge .icon{height:14px;width:14px}.access-card h1{text-align:center;margin:13px 0 12px;font-size:28px;letter-spacing:-.8px}.access-description{text-align:center;color:#806571;font-size:13px;line-height:1.8;margin:0 0 26px}.access-input{display:flex;align-items:center;border:1px solid #dccdd1;border-radius:10px;height:50px;padding:0 11px;gap:7px}.access-input:focus-within{border-color:var(--red);box-shadow:0 0 0 3px #c52c380c}.access-input input{width:100%;min-width:0;outline:none!important;border:0;height:100%;font-size:12px;letter-spacing:.3px;background:transparent;color:#493540}.access-input input::placeholder{font-size:10px;color:#9d8690;letter-spacing:0}.access-input button{background:#f8efed;border-radius:6px;color:#97616d;padding:6px 8px;min-width:40px;font-size:11px;min-height:32px}.access-error{font-size:11px;color:#b4293a;line-height:1.7;min-height:18px;margin:8px 0 12px}.access-input:has(input[aria-invalid=true]){border-color:var(--red)}.access-help{text-align:center;margin-top:27px;font-size:11px;color:#826973}.access-contacts{display:flex;justify-content:center;gap:9px;margin-top:11px}.access-contacts .contact-link{height:40px;color:#8f5664}.access-foot{margin-top:25px;color:#916f7d;font-size:10px}.key-session{min-width:35px}.key-session .icon{width:14px;height:14px}@media(max-width:550px){.access-card{padding:29px 24px 25px}.access-card h1{font-size:25px}.access-brand{font-size:24px;margin-bottom:24px}.access-input{height:52px}.access-input button{min-height:40px}.contact-nav>a:last-of-type>span:last-child{display:none}.brand{font-size:20px;gap:8px}.contact-nav{gap:6px}.contact-nav .contact-link{padding:0 9px}.key-session span{display:none}.key-session{padding:0 11px!important}}
 
+.header-links{display:flex;gap:27px;margin-left:auto;margin-right:25px;color:#74606a;font-size:13px;font-weight:600}.header-links a:hover{color:var(--red)}.intro{align-items:center;gap:55px;margin-bottom:32px}.hero-copy{flex:1;min-width:0}.hero-copy h1{font-size:51px;letter-spacing:-2px;line-height:1.18}.hero-copy p{font-size:15px;line-height:1.85;max-width:560px}.hero-actions{display:flex;align-items:center;gap:20px;margin-top:24px}.hero-start{display:flex;align-items:center;gap:16px;border-radius:10px;background:var(--red);color:white;padding:13px 19px;font-size:13px;font-weight:650}.hero-start:hover{background:var(--red-deep)}.hero-actions>span{color:#74606a;font-size:12px}.hero-offer{width:340px;flex-shrink:0;background:linear-gradient(135deg,#ae1d2c,#d53c49);border:1px solid #af2633;border-radius:22px;padding:28px 30px;color:white;box-shadow:0 15px 35px #b9212c16;position:relative;overflow:hidden}.hero-offer:after{content:"";position:absolute;width:180px;height:180px;right:-70px;top:-70px;border:32px solid #ffffff0c;border-radius:50%;pointer-events:none}.offer-label{display:flex;align-items:center;gap:8px;font-size:9px;letter-spacing:1px;color:#ffe1e3;font-weight:650}.offer-label .icon{height:15px;width:15px}.hero-offer h2{font-size:36px;letter-spacing:-1.3px;margin:15px 0 2px;line-height:1.2}.hero-offer p{font-size:12px;margin:6px 0;color:#ffe1e3}.offer-price{font-size:37px;font-weight:720;letter-spacing:-1px;margin:20px 0 16px;line-height:1}.offer-price span{font-size:13px;letter-spacing:0;font-weight:500;margin-left:5px}.hero-offer button{display:flex;justify-content:space-between;align-items:center;width:100%;padding:12px 15px;border-radius:9px;background:white;color:#ab2030;font-size:12px;font-weight:700;min-height:44px}.hero-offer small{display:block;margin-top:12px;font-size:10px;color:#ffe1e3}.usage-strip{display:flex;gap:25px;align-items:center;background:#fff;border:1px solid #ecdadd;border-radius:15px;padding:19px 23px;margin-bottom:25px}.usage-heading{display:flex;gap:13px;align-items:center;flex:1;min-width:0}.usage-icon{display:grid;place-items:center;width:40px;height:42px;flex-shrink:0;border-radius:12px;background:#fff0ef;color:var(--red)}.usage-heading strong{font-size:13px}.usage-heading p{font-size:11px;color:#74606a;line-height:1.65;margin:4px 0 0}.usage-meter{min-width:155px;font-size:11px;color:#68525c}.usage-meter span{display:block;text-align:right;margin-bottom:7px;font-weight:650;font-variant-numeric:tabular-nums}.usage-meter progress{appearance:none;-webkit-appearance:none;width:100%;height:5px;border:0;display:block;border-radius:8px;overflow:hidden;background:#f5e5e6}.usage-meter progress::-webkit-progress-bar{background:#f5e5e6}.usage-meter progress::-webkit-progress-value{background:var(--red)}.usage-meter progress::-moz-progress-bar{background:var(--red)}.usage-strip>button{display:flex;align-items:center;gap:8px;color:var(--red);background:#fff5f3;border:1px solid #f0d1d4;padding:10px 13px;border-radius:9px;font-size:11px;font-weight:650;min-height:42px}.usage-strip.is-locked{border-color:#c52c38;background:#fff9f8}.usage-strip.is-unlimited .usage-icon{background:#ebf5ef;color:#236f58}.how-it-works{list-style:none;display:grid;grid-template-columns:repeat(3,1fr);margin:0 0 28px;padding:0;gap:20px}.how-it-works li{display:flex;align-items:center;gap:13px;padding:0 12px}.how-it-works li+li{border-left:1px solid #e7dadd;padding-left:30px}.how-it-works li>span{color:#b35a63;font-size:24px;font-weight:300;letter-spacing:-1px}.how-it-works strong{display:block;font-size:12px;font-weight:650}.how-it-works small{display:block;color:#7d6771;font-size:10px;margin-top:3px}.quantity-error{color:var(--red);font-size:12px;margin:12px 0 0}.access-gate{position:fixed;inset:0;z-index:70;min-height:0;overflow:auto;background:#27121b88;backdrop-filter:blur(5px);padding:26px 18px}.access-card{position:relative;flex-shrink:0;max-width:465px;box-shadow:0 22px 90px #220c2038}.close-key{position:absolute;top:13px;right:13px;height:36px;width:36px;border-radius:50%;background:#faf0ef;color:#8b5a65;font-size:23px;line-height:1}.access-card h2{text-align:center;font-size:27px;line-height:1.3;letter-spacing:-.9px;margin:14px 0 12px}.access-foot{color:white}.access-brand{margin-bottom:24px}.access-description strong{color:var(--red);white-space:nowrap}.modal-open{overflow:hidden}.hero-start,.hero-offer button,.usage-strip>button{transition:background .18s,transform .18s}.hero-start:focus-visible,.hero-offer button:focus-visible{outline:3px solid #eea5ac;outline-offset:4px}html{scroll-behavior:smooth;scroll-padding-top:24px}
+@media(max-width:1050px){.header-links{gap:18px;margin-right:10px}.hero-copy h1{font-size:43px}.intro{gap:30px}.hero-offer{width:300px;padding:25px}.usage-strip{gap:15px}.usage-meter{min-width:115px}.hero-copy p{font-size:13px}}
+@media(max-width:790px){.header-links{display:none}.intro{display:grid;grid-template-columns:minmax(0,1fr) 235px;gap:24px;margin-bottom:24px}.hero-copy h1{font-size:35px;letter-spacing:-1.2px}.hero-offer{width:100%;padding:21px}.hero-offer h2{font-size:29px}.offer-label{font-size:8px}.offer-price{font-size:30px}.hero-actions{flex-wrap:wrap;gap:12px;margin-top:18px}.hero-actions>span{font-size:10px}.hero-start{font-size:11px;padding:12px 14px}.usage-strip{flex-wrap:wrap;padding:16px 18px;gap:12px}.usage-heading{flex-basis:calc(100% - 150px)}.usage-meter{min-width:105px}.usage-strip>button{margin-left:53px;min-height:44px}.how-it-works{gap:9px}.how-it-works li{padding:0;gap:8px}.how-it-works li+li{padding-left:12px}.how-it-works strong{font-size:10px}.how-it-works small{font-size:9px}.how-it-works li>span{font-size:21px}.access-card h2{font-size:25px}}
+@media(max-width:550px){.intro{grid-template-columns:1fr;gap:23px}.hero-copy h1{font-size:40px;line-height:1.2}.hero-copy p{font-size:13px}.hero-offer{display:grid;grid-template-columns:1fr auto;column-gap:10px;padding:21px}.offer-label{grid-column:1/-1;font-size:8px}.hero-offer h2{margin-top:13px;font-size:29px}.hero-offer p{grid-column:1;font-size:10px}.offer-price{grid-column:2;grid-row:2/4;margin:15px 0 0;font-size:29px;align-self:center}.offer-price span{display:block;text-align:right;font-size:11px;margin-top:4px}.hero-offer button{grid-column:1/-1;margin-top:14px}.hero-offer small{grid-column:1/-1;font-size:9px}.usage-heading{flex-basis:100%}.usage-meter{flex:1;margin-left:53px;min-width:0}.usage-meter span{text-align:left}.usage-strip>button{margin-left:0;padding:10px;font-size:10px}.how-it-works{margin-bottom:22px;grid-template-columns:1fr;gap:13px}.how-it-works li,.how-it-works li+li{border:0;padding:0 3px;gap:12px}.how-it-works strong{font-size:12px}.how-it-works small{font-size:10px}.how-it-works li>span{font-size:20px}.hero-actions>span{font-size:11px}.access-gate{justify-content:flex-start;padding-top:25px}.access-brand{margin-bottom:19px}.access-description{font-size:12px}.access-help{margin-top:20px}.contact-footer .footer-copy strong{color:#553740;font-size:13px}.usage-heading strong{font-size:12px}.usage-heading p{font-size:10px}.summary-top p,.summary-row,.summary-row strong,.toggle-line,.test-note,.test-run,.job-detail,.event{color:#755560}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 </style>
 </head>
-<body class="access-locked">
+<body>
 <a class="skip-link" href="#mainContent">Bỏ qua đến nội dung chính</a>
 <svg class="defs" xmlns="http://www.w3.org/2000/svg"><defs>
 <symbol id="i-form" viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7"/><path d="M3 6v15"/></symbol>
@@ -1430,37 +1471,42 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="white"/><circle cx="15" cy="12" r="2" fill="white"/><circle cx="8" cy="18" r="2" fill="white"/></symbol>
 <symbol id="i-alert" viewBox="0 0 24 24"><path d="m12 3 10 18H2zM12 9v5m0 3v.01"/></symbol>
 </defs></svg>
-<section id="accessGate" class="access-gate" aria-labelledby="accessTitle">
+<!-- MUA KEY: sửa giá 30.000đ/key và các liên kết Facebook/Zalo trong phần này và thẻ giới thiệu trên trang chủ. -->
+<section id="accessGate" class="access-gate" role="dialog" aria-modal="true" aria-labelledby="accessTitle" hidden>
 <div class="access-card">
+<button id="closeKey" type="button" class="close-key" aria-label="Đóng cửa sổ nhập key">×</button>
 <div class="access-brand"><span class="brand-mark"><svg class="icon"><use href="#i-form"/></svg></span><strong>KDautoform</strong></div>
-<div class="access-badge"><svg class="icon"><use href="#i-shield"/></svg>KÍCH HOẠT CÔNG CỤ</div>
-<h1 id="accessTitle">Nhập key để bắt đầu.</h1>
-<p class="access-description">Mỗi key kích hoạt đúng một lần. Tải lại trang bằng F5 hoặc đăng xuất sẽ cần key mới.</p>
+<div class="access-badge"><svg class="icon"><use href="#i-shield"/></svg>NÂNG CẤP KDautoform</div>
+<h2 id="accessTitle">Mở khóa không giới hạn.</h2>
+<p class="access-description" id="upgradeDescription">Dùng miễn phí 10 lượt gửi. Mua key unlimited lần giá <strong>30.000đ/1 key</strong> qua Facebook hoặc Zalo bên dưới.</p>
 <form id="accessForm">
 <label class="label" for="accessKey">Key sử dụng</label>
 <div class="access-input"><input id="accessKey" type="password" required maxlength="256" placeholder="KD-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX" autocomplete="off" spellcheck="false" autocapitalize="characters" aria-describedby="accessHint accessError"><button type="button" id="toggleKey" aria-label="Hiện key" aria-pressed="false">Hiện</button></div>
 <p id="accessHint" style="font-size:11px;color:#806571;line-height:1.7;margin:8px 0 0">Dán mã bắt đầu bằng KD-. Công cụ tự bỏ phần tên key và ký tự thừa khi sao chép.</p>
 <p id="accessError" class="access-error" role="alert" aria-live="polite"></p>
-<button id="activateKey" type="submit" class="primary"><svg class="icon"><use href="#i-arrow"/></svg>Kích hoạt KDautoform</button>
+<button id="activateKey" type="submit" class="primary"><svg class="icon"><use href="#i-arrow"/></svg>Mở khóa bằng key</button>
 </form>
-<div class="access-help">Chưa có key hoặc cần hỗ trợ?</div>
+<div id="paidKeyControls" hidden><p class="access-help">Key unlimited đang hoạt động trên trình duyệt này.</p><button type="button" id="deactivateKey" class="test-run">Ngừng dùng key trên trình duyệt này</button></div>
+<div class="access-help">Mua key unlimited · 30.000đ/key</div>
 <div class="access-contacts"><a class="contact-link" href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span>0343415673</a><a class="contact-link" href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span>Facebook</a></div>
 </div>
 <div class="access-foot">KDautoform · Công cụ điền Google Form</div>
 </section>
-<div id="workspaceApp" hidden inert>
+<div id="workspaceApp">
 
 <header class="header"><div class="header-inner">
 <a href="/" class="brand" aria-label="KDautoform trang chính"><span class="brand-mark"><svg class="icon"><use href="#i-form"/></svg></span><span>KDautoform</span></a>
-<div class="contact-nav"><button id="logoutKey" type="button" class="contact-link key-session" aria-label="Đổi key"><svg class="icon"><use href="#i-shield"/></svg><span>Đổi key</span></button><span class="contact-note">Trao đổi trực tiếp</span><a class="contact-link" href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span><span class="phone-label">0343415673</span></a><a class="contact-link" href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span><span>Facebook</span></a></div>
+<nav class="header-links" aria-label="Điều hướng"><a href="#setupTitle">Công cụ</a><a href="#contact">Liên hệ</a></nav><div class="contact-nav"><button id="logoutKey" type="button" class="contact-link key-session" aria-label="Nhập key unlimited"><svg class="icon"><use href="#i-shield"/></svg><span>Nhập key</span></button><a class="contact-link" href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span><span class="phone-label">0343415673</span></a><a class="contact-link" href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span><span>Facebook</span></a></div>
 </div></header>
 <main id="mainContent" tabindex="-1">
-<section class="intro"><div><div class="eyebrow">CÔNG CỤ ĐIỀN GOOGLE FORM</div><h1>Một đường link.<br><span>Tỷ lệ do bạn quyết định.</span></h1><p>Đặt số lượng, tùy chỉnh câu trả lời. Phần còn lại để KDautoform thực hiện.</p></div><div class="local-badge"><i></i>Không cần tài khoản · Chạy trên máy bạn</div></section>
+<section class="intro"><div class="hero-copy"><div class="eyebrow">GOOGLE FORMS · DỮ LIỆU MÔ PHỎNG</div><h1>Một đường link.<br><span>Chủ động mọi tỷ lệ.</span></h1><p>Đọc toàn bộ biểu mẫu, tùy chỉnh từng đáp án và theo dõi tiến trình ở một nơi. Bắt đầu ngay với 10 lượt miễn phí.</p><div class="hero-actions"><a class="hero-start" href="#setupTitle">Dùng thử miễn phí <svg class="icon"><use href="#i-arrow"/></svg></a><span>Không cần tài khoản</span></div></div><aside class="hero-offer" aria-label="Gói unlimited"><div class="offer-label"><svg class="icon"><use href="#i-spark"/></svg>THÊM TỰ DO CHO MỖI LƯỢT CHẠY</div><h2>Unlimited.</h2><p>Một key. Không giới hạn lượt điền.</p><div class="offer-price">30.000<span>đ / key</span></div><button type="button" id="heroUpgrade">Mua key &amp; mở khóa <svg class="icon"><use href="#i-arrow"/></svg></button><small>Liên hệ trực tiếp qua Facebook hoặc Zalo</small></aside></section>
+<section class="usage-strip" aria-label="Hạn mức sử dụng"><div class="usage-heading"><span class="usage-icon"><svg class="icon"><use href="#i-shield"/></svg></span><div><strong id="planLabel">10 lượt miễn phí dành cho bạn</strong><p id="usageDetail">Đang kiểm tra hạn mức sử dụng...</p></div></div><div class="usage-meter"><span id="usageCount" aria-live="polite">— / 10 lượt</span><progress id="usageProgress" max="10" value="0" aria-label="Lượt miễn phí đã sử dụng"></progress></div><button type="button" id="upgradeButton">Mở khóa unlimited <svg class="icon"><use href="#i-arrow"/></svg></button></section>
+<ol class="how-it-works" aria-label="Ba bước sử dụng"><li><span>01</span><div><strong>Dán link biểu mẫu</strong><small>Tự đọc câu hỏi qua các trang</small></div></li><li><span>02</span><div><strong>Chọn tỷ lệ mong muốn</strong><small>Điều chỉnh hoặc tạo ngẫu nhiên</small></div></li><li><span>03</span><div><strong>Chạy &amp; theo dõi</strong><small>Xem kết quả, tải nhật ký</small></div></li></ol>
 <section class="panel setup" aria-labelledby="setupTitle">
-<div class="panel-head"><span class="step">01</span><h2 id="setupTitle">Thiết lập lượt điền</h2><span class="tiny">Dán link là công cụ tự kích hoạt</span></div>
+<div class="panel-head"><span class="step">01</span><h2 id="setupTitle">Thiết lập lượt điền</h2><span class="tiny">Dán link để tự đọc toàn bộ form</span></div>
 <div class="input-grid"><div><label class="label" for="formUrl">Link Google Form</label><div class="url-wrap"><svg class="icon"><use href="#i-link"/></svg><input id="formUrl" type="url" placeholder="https://docs.google.com/forms/d/e/.../viewform" autocomplete="off" spellcheck="false"><button id="scanAgain" class="scan-again" type="button">Đọc lại</button></div></div>
-<div><label class="label" for="quantity">Số lượng mong muốn</label><div class="quantity"><button type="button" id="minusCount" aria-label="Giảm số lượng">−</button><input id="quantity" type="number" min="0" step="1" value="100" aria-label="Số lượng mong muốn"><button type="button" id="plusCount" aria-label="Tăng số lượng">+</button></div></div></div>
-<div class="setup-bottom"><div id="scanStatus" class="scan-status" role="status" aria-live="polite"><svg class="icon"><use href="#i-shield"/></svg><span>Hỗ trợ Google Forms công khai và link forms.gle</span></div><span class="setup-tip">Nhập 0 để chạy liên tục</span></div>
+<div><label class="label" for="quantity">Số lượng mong muốn</label><div class="quantity"><button type="button" id="minusCount" aria-label="Giảm số lượng">−</button><input id="quantity" type="number" min="1" max="10" step="1" value="10" aria-label="Số lượng mong muốn"><button type="button" id="plusCount" aria-label="Tăng số lượng">+</button></div></div></div>
+<div class="setup-bottom"><div id="scanStatus" class="scan-status" role="status" aria-live="polite"><svg class="icon"><use href="#i-shield"/></svg><span>Hỗ trợ Google Forms công khai và link forms.gle</span></div><span id="quantityHint" class="setup-tip">Tối đa 10 lượt miễn phí</span></div><p id="quantityError" class="quantity-error" role="status" hidden></p>
 </section>
 <div class="workspace">
 <section class="questions" aria-labelledby="ratioTitle">
@@ -1485,7 +1531,7 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <div id="jobPanel" class="job-panel" hidden><div class="job-head"><span>Tiến trình thực hiện</span><span id="jobStatus" class="status-chip">ĐANG CHẠY</span></div><div class="job-numbers"><strong id="jobDone">0</strong><span id="jobTotal">/ 100 lượt</span></div><div id="jobBar" class="job-bar"><i></i></div><div id="jobDetail" class="job-detail" role="status" aria-live="polite"></div><div id="jobEvents" class="events"></div><a id="downloadLog" class="download" hidden><svg class="icon"><use href="#i-download"/></svg>Tải nhật ký kết quả</a></div>
 </aside>
 </div>
-<footer class="contact-footer"><div class="footer-copy"><strong>Cần trao đổi trực tiếp?</strong><p>Liên hệ để được hỗ trợ thiết lập và sử dụng công cụ.</p></div><div class="footer-links"><a href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span>0343415673</a><a href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span>Liên hệ Facebook</a></div></footer>
+<footer id="contact" class="contact-footer"><div class="footer-copy"><strong>Mua key unlimited · 30.000đ/key</strong><p>Nhắn Facebook hoặc Zalo để nhận key và được hỗ trợ sử dụng.</p></div><div class="footer-links"><a href="https://zalo.me/0343415673" target="_blank" rel="noopener noreferrer"><span class="zalo-mark">Zalo</span>0343415673</a><a href="https://www.facebook.com/khuong.duy.081207/" target="_blank" rel="noopener noreferrer"><span class="fb-mark">f</span>Liên hệ Facebook</a></div></footer>
 <div class="copyright">KDautoform · SIMPLE INPUT. YOUR OWN DISTRIBUTION.</div>
 </main>
 <div id="toast" class="toast" role="status" hidden></div>
@@ -1498,17 +1544,18 @@ const icon=name=>'<svg class="icon"><use href="#i-'+name+'"/></svg>';
 const escapeHTML=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const colors=["#bc2635","#d34e59","#e78186","#eeb0af","#f1cac5","#e7d9d3","#c98c95","#dcb1b5"];
 const kinds={single:"Chọn một",dropdown:"Danh sách",multiple:"Chọn nhiều",scale:"Chấm điểm",grid:"Bảng đánh giá",grid_multiple:"Bảng chọn nhiều",text:"Trả lời ngắn",paragraph:"Tự luận",date:"Ngày tháng",time:"Thời gian"};
-const state={schema:null,config:{},scanId:null,scanToken:0,scanning:false,job:null,armed:false,autoTimer:null,remaining:0,pollTimer:null,forceCheck:false,keyUsed:false,undo:[]};
+const state={schema:null,config:{},scanId:null,scanToken:0,scanning:false,job:null,armed:false,autoTimer:null,remaining:0,pollTimer:null,forceCheck:false,access:null,undo:[]};
 const emptyMarkup=$("questionList").innerHTML;
 let urlTimer=null,toastTimer=null;
 function toast(message){$("toast").textContent=message;$("toast").hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$("toast").hidden=true,4200)}
-async function api(path,data){const response=await fetch(path,{method:data?"POST":"GET",headers:data?{"Content-Type":"application/json","X-Local-Token":TOKEN}:{},body:data?JSON.stringify(data):undefined});let result;try{result=await response.json()}catch{throw Error("Máy chủ chưa trả về dữ liệu. Kiểm tra cửa sổ Python.")}if(!response.ok){if(result.key_used){state.keyUsed=true;cancelCountdown()}if(response.status===401&&!path.startsWith("/api/auth/"))lockAccess(result.error);throw Error(result.error||"Không thực hiện được thao tác.")}return result}
+async function api(path,data){const response=await fetch(path,{method:data?"POST":"GET",headers:data?{"Content-Type":"application/json","X-Local-Token":TOKEN}:{},body:data?JSON.stringify(data):undefined});let result;try{result=await response.json()}catch{throw Error("Máy chủ chưa trả về dữ liệu. Vui lòng thử lại.")}if(result.plan)applyAccess(result);if(!response.ok){if(response.status===402){cancelCountdown();if(result.locked)openKeyModal(result.error)}if(response.status===401&&!path.startsWith("/api/auth/"))status(result.error,"error");throw Error(result.error||"Không thực hiện được thao tác.")}return result}
 function activeJob(){return state.job&&["queued","running","stopping"].includes(state.job.status)}
 function validLink(value){return /^https:\/\/(?:docs\.google\.com\/forms\/|forms\.gle\/|forms\.google\.com\/)/i.test(value)}
 function status(text,kind=""){const node=$("scanStatus");node.className="scan-status "+kind;node.innerHTML=(kind==="loading"?'<span class="spinner"></span>':icon(kind==="success"?"check":kind==="error"?"alert":"shield"))+"<span>"+escapeHTML(text)+"</span>"}
 function quantity(){const raw=$("quantity").value.trim();if(raw==="")return null;const value=Number(raw);return Number.isInteger(value)&&value>=0?value:null}
 function fieldValid(field){const entry=state.config[field.id];if(!entry)return false;if(field.options.length){const values=field.options.map(option=>Number(entry.rates[option]));if(values.some(value=>!Number.isFinite(value)||value<0||value>100))return false;const sum=values.reduce((a,b)=>a+b,0);return ["multiple","grid_multiple"].includes(field.kind)?sum>=field.minimum*100-.001&&sum<=field.maximum*100+.001:Math.abs(sum-100)<.001}return entry.mode!=="fixed"||Boolean(entry.value.trim())}
-function ready(){return !state.keyUsed&&Boolean(state.schema)&&!state.scanning&&quantity()!==null&&state.schema.fields.every(fieldValid)}
+function allowedCount(){const n=quantity();return n!==null&&Boolean(state.access)&&(state.access.plan==="unlimited"||(n>0&&n<=state.access.remaining))}
+function ready(){return Boolean(state.access)&&!state.access.locked&&Boolean(state.schema)&&!state.scanning&&allowedCount()&&state.schema.fields.every(fieldValid)}
 function apportion(weights,total=100){const sum=weights.reduce((a,b)=>a+b,0);if(!sum)return weights.map((_,i)=>i===0?total:0);const ideal=weights.map(v=>v/sum*total),values=ideal.map(Math.floor);const order=values.map((_,i)=>i).sort((a,b)=>(ideal[b]-values[b])-(ideal[a]-values[a]));const left=total-values.reduce((a,b)=>a+b,0);for(let i=0;i<left;i++)values[order[i]]++;return values}
 function fold(value){return String(value).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/đ/g,"d")}
 function randomRates(field){let weights=field.options.map(()=>.8+Math.random()*.5);const labels=field.options.map(fold);const scores=labels.map(label=>label.includes("khong dong y")?label.includes("hoan toan")?1:2:label.includes("dong y")?label.includes("hoan toan")?5:4:label.includes("binh thuong")||label.includes("trung lap")?3:0);if(scores.length===5&&scores.slice().sort().join()==="1,2,3,4,5")weights=scores.map(score=>[12,17,25,28,18][score-1]+Math.random()*6-3);else if(field.kind==="scale"&&field.options.length>=3)weights=field.options.map((_,i)=>Math.exp(-.5*Math.pow((i/(field.options.length-1)-.62)/.30,2))*(.9+Math.random()*.2));else if(labels.some(v=>/^(co|yes)\b/.test(v))&&labels.some(v=>/^(khong|no)\b/.test(v)))weights=labels.map(v=>/^(co|yes)\b/.test(v)?1.5+Math.random()*.2:1);if(["multiple","grid_multiple"].includes(field.kind)){const low=field.minimum*100,high=field.maximum*100;const total=Math.min(high,Math.max(low,140+Math.floor(Math.random()*100)));const values=weights.map(()=>0);for(let n=0;n<total;n++){const available=weights.map((_,i)=>i).filter(i=>values[i]<100);const sum=available.reduce((a,i)=>a+weights[i],0);let point=Math.random()*sum,chosen=available[available.length-1];for(const i of available){point-=weights[i];if(point<=0){chosen=i;break}}values[chosen]++}return values}return apportion(weights)}
@@ -1519,20 +1566,20 @@ return '<article class="panel question-card" id="'+cardId(field)+'" data-field="
 function updateCard(field){const card=$(cardId(field));if(!card)return;const valid=fieldValid(field);card.classList.toggle("invalid",!valid);if(!field.options.length)return;const rates=field.options.map(option=>Number(state.config[field.id].rates[option]));const total=rates.reduce((a,b)=>a+b,0);field.options.forEach((option,i)=>{const segment=card.querySelector('[data-segment="'+i+'"]');segment.style.width=(total?Math.max(0,rates[i])/total*100:0)+"%"});const sum=card.querySelector(".sum");sum.innerHTML=(valid?icon("check"):icon("alert"))+(Number.isFinite(total)?Number(total.toFixed(2)):"—")+"%";const multi=["multiple","grid_multiple"].includes(field.kind);card.querySelector(".normalize-one").hidden=multi;sum.title=multi?"Tổng tỷ lệ có thể vượt 100% do được chọn nhiều đáp án":"Tổng tỷ lệ phải bằng 100%"}
 function renderQuestions(){if(!state.schema){$("questionList").innerHTML=emptyMarkup;return}$("questionList").innerHTML=state.schema.fields.map(buildCard).join("");state.schema.fields.forEach(updateCard);$("fieldCount").textContent=state.schema.question_count+" câu hỏi";$("formMeta").hidden=false;$("formMeta").innerHTML="<strong>"+escapeHTML(state.schema.title)+"</strong><small>"+state.schema.pages.length+" trang · "+state.schema.fields.length+" mục trả lời · "+(state.schema.branching?"Có phân nhánh":"Tự điền đủ toàn bộ trang")+"</small>";$("toolbar").hidden=false;$("pageFilter").innerHTML='<option value="">Mọi trang</option>'+state.schema.pages.map(page=>'<option value="'+page.index+'">Trang '+(page.index+1)+'</option>').join("");filterQuestions();renderSummary()}
 function filterQuestions(){if(!state.schema)return;const term=fold($("searchQuestions").value),page=$("pageFilter").value;let count=0;for(const field of state.schema.fields){const visible=(!term||fold(field.question+" "+(field.row||"")).includes(term))&&(page===""||String(field.page)===page);const card=$(cardId(field));if(card){card.hidden=!visible;if(visible)count++}}let empty=$("noResults");if(!count&&!empty){empty=document.createElement("div");empty.id="noResults";empty.className="no-results";empty.textContent="Không có câu hỏi phù hợp."; $("questionList").append(empty)}else if(count&&empty)empty.remove()}
-function renderSummary(){const count=quantity(),isActive=activeJob();$("summaryCount").innerHTML=(count===0?"∞":count===null?"—":count.toLocaleString("vi-VN"))+"<small>lượt điền</small>";$("summaryQuestions").textContent=state.schema?state.schema.question_count+" câu · "+state.schema.pages.length+" trang":"Chưa kết nối";const valid=state.schema?state.schema.fields.filter(fieldValid).length:0,total=state.schema?.fields.length||0;$("summaryValid").textContent=total?valid+"/"+total+" mục":"—";$("summaryValid").className=total?(valid===total?"good":"bad"):"";$("summaryMode").textContent=state.schema?(count>0&&!state.schema.branching&&!state.schema.fields.some(f=>f.exclusive_columns)?"Theo số lượt":"Theo xác suất"):"Theo mong muốn";const button=$("startButton");button.classList.toggle("stop",Boolean(isActive));button.disabled=isActive?state.job.status==="stopping":!ready();button.innerHTML=icon(isActive?"stop":"play")+"<span>"+(isActive?(state.job.status==="stopping"?"Đang dừng...":"Dừng lượt chạy"):state.remaining>0?"Bắt đầu ngay":state.schema?"Bắt đầu điền form":"Dán link để bắt đầu")+"</span>";$("testButton").disabled=!ready()||isActive;$("randomAll").disabled=!state.schema||isActive;$("balanceAll").disabled=!state.schema||isActive;$("undoRates").disabled=!state.undo.length||isActive;$("formUrl").disabled=Boolean(isActive);$("quantity").disabled=Boolean(isActive);$("minusCount").disabled=Boolean(isActive);$("plusCount").disabled=Boolean(isActive);$("scanAgain").disabled=Boolean(isActive)||state.scanning;document.querySelectorAll(".question-card input,.question-card select,.question-card textarea,.question-card button").forEach(el=>el.disabled=Boolean(isActive));if(state.keyUsed&&!isActive){button.disabled=false;button.innerHTML=icon("shield")+"<span>Nhập key mới</span>";$("testButton").disabled=true;$("scanAgain").disabled=true}}
+function renderSummary(){const count=quantity(),isActive=activeJob(),locked=Boolean(state.access?.locked),unlimited=state.access?.plan==="unlimited";$("summaryCount").innerHTML=(count===0?"∞":count===null?"—":count.toLocaleString("vi-VN"))+"<small>lượt điền</small>";$("summaryQuestions").textContent=state.schema?state.schema.question_count+" câu · "+state.schema.pages.length+" trang":"Chưa kết nối";const valid=state.schema?state.schema.fields.filter(fieldValid).length:0,total=state.schema?.fields.length||0;$("summaryValid").textContent=total?valid+"/"+total+" mục":"—";$("summaryValid").className=total?(valid===total?"good":"bad"):"";$("summaryMode").textContent=state.schema?(count>0&&!state.schema.branching&&!state.schema.fields.some(f=>f.exclusive_columns)?"Theo số lượt":"Theo xác suất"):"Theo mong muốn";const button=$("startButton");button.classList.toggle("stop",Boolean(isActive));button.disabled=isActive?state.job.status==="stopping":locked?false:!ready();button.innerHTML=icon(isActive?"stop":locked?"shield":"play")+"<span>"+(isActive?(state.job.status==="stopping"?"Đang dừng...":"Dừng lượt chạy"):locked?"Nhập key để tiếp tục":state.remaining>0?"Bắt đầu ngay":state.schema?"Bắt đầu điền form":"Dán link để bắt đầu")+"</span>";$("testButton").disabled=!ready()||isActive;$("randomAll").disabled=!state.schema||isActive;$("balanceAll").disabled=!state.schema||isActive;$("undoRates").disabled=!state.undo.length||isActive;$("formUrl").disabled=Boolean(isActive)||locked;$("quantity").disabled=Boolean(isActive)||locked;$("minusCount").disabled=Boolean(isActive)||locked;$("plusCount").disabled=Boolean(isActive)||locked||(!unlimited&&count>=state.access?.remaining);$("scanAgain").disabled=Boolean(isActive)||state.scanning||locked;document.querySelectorAll(".question-card input,.question-card select,.question-card textarea,.question-card button").forEach(el=>el.disabled=Boolean(isActive)||locked);const badCount=Boolean(state.access)&&!isActive&&!locked&&!allowedCount();$("quantityError").hidden=!badCount;$("quantityError").textContent=badCount?(unlimited?"Nhập số nguyên từ 0 trở lên.":"Bạn còn "+state.access.remaining+" lượt miễn phí. Chọn từ 1 đến "+state.access.remaining+" hoặc mở khóa unlimited."):""}
 function cancelCountdown(){clearInterval(state.autoTimer);state.autoTimer=null;state.remaining=0;$("countdown").hidden=true;renderSummary()}
-function scheduleAuto(){persistDraft();cancelCountdown();if(state.keyUsed||!state.armed||!$("autoRun").checked||!ready()||activeJob())return;state.remaining=12;$("countdown").hidden=false;function paint(){$("countdown").innerHTML="Tự bắt đầu sau <strong>"+state.remaining+" giây</strong>. Chỉnh tỷ lệ để đặt lại thời gian. <button type='button' id='pauseAuto'>Tạm dừng</button>";renderSummary()}paint();state.autoTimer=setInterval(()=>{state.remaining--;if(state.remaining<=0){cancelCountdown();startJob(false).catch(error=>toast(error.message))}else paint()},1000)}
+function scheduleAuto(){persistDraft();cancelCountdown();if(!state.access||state.access.locked||!state.armed||!$("autoRun").checked||!ready()||activeJob())return;state.remaining=12;$("countdown").hidden=false;function paint(){$("countdown").innerHTML="Tự bắt đầu sau <strong>"+state.remaining+" giây</strong>. Chỉnh tỷ lệ để đặt lại thời gian. <button type='button' id='pauseAuto'>Tạm dừng</button>";renderSummary()}paint();state.autoTimer=setInterval(()=>{state.remaining--;if(state.remaining<=0){cancelCountdown();startJob(false).catch(error=>toast(error.message))}else paint()},1000)}
 function rememberRates(){state.undo.push(JSON.stringify(state.config));if(state.undo.length>25)state.undo.shift();$("undoRates").disabled=false}
 function persistDraft(){if(state.scanId)localStorage.setItem("formpilot.draft",JSON.stringify({scanId:state.scanId,config:state.config}))}
 function undoRates(){if(!state.undo.length||activeJob())return;state.config=JSON.parse(state.undo.pop());renderQuestions();$("undoRates").disabled=!state.undo.length;persistDraft();scheduleAuto();toast("Đã hoàn tác thay đổi tỷ lệ.")}
 function updateRate(fieldId,optionIndex,value){rememberRates();const field=state.schema.fields.find(f=>f.id===fieldId);if(!field)return;const rate=Number(value);state.config[fieldId].rates[field.options[optionIndex]]=rate;const card=$(cardId(field));card.querySelectorAll('[data-option="'+optionIndex+'"]').forEach(input=>{if(input!==document.activeElement)input.value=value});updateCard(field);renderSummary();persistDraft();scheduleAuto()}
 function refreshCard(field){const old=$(cardId(field));if(old){old.outerHTML=buildCard(field);updateCard(field)}}
 function normalizeField(field,balanced=false){if(!field.options.length)return;if(["multiple","grid_multiple"].includes(field.kind)){if(balanced){const target=Math.min(field.maximum*100,Math.max(field.minimum*100,180));let values=apportion(field.options.map(()=>1),target);state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}return}const values=apportion(field.options.map(option=>balanced?1:Math.max(0,Number(state.config[field.id].rates[option])||0)));state.config[field.id].rates=Object.fromEntries(field.options.map((v,i)=>[v,values[i]]))}
-async function scanForm(){const url=$("formUrl").value.trim();cancelCountdown();if(activeJob())return;if(!validLink(url)){status(url?"Vui lòng nhập link Google Form hợp lệ.":"Hỗ trợ Google Forms công khai và link forms.gle",url?"error":"");return}const token=++state.scanToken;state.scanning=true;state.armed=true;state.schema=null;state.config={};$("formMeta").hidden=true;$("toolbar").hidden=true;$("fieldCount").textContent="Đang đọc...";$("questionList").innerHTML='<div class="loading-skeleton" aria-label="Đang đọc câu hỏi"></div>';status("Đang đọc câu hỏi và tất cả các trang...","loading");renderSummary();try{const result=await api("/api/scan",{url});if(token!==state.scanToken)return;state.scanId=result.scan_id;const poll=async()=>{if(token!==state.scanToken)return;try{const value=await api("/api/scans/"+state.scanId);if(token!==state.scanToken)return;if(value.status==="scanning"){setTimeout(poll,650);return}if(value.status==="error")throw Error(value.error);state.schema=value.schema;state.config=value.config;state.undo=[];$("undoRates").disabled=true;state.scanning=false;localStorage.setItem("formpilot.scan",state.scanId);localStorage.setItem("formpilot.url",url);renderQuestions();status("Đã đọc "+value.schema.question_count+" câu hỏi qua "+value.schema.pages.length+" trang.","success");scheduleAuto()}catch(error){if(token===state.scanToken)scanError(error)}};poll()}catch(error){if(token===state.scanToken)scanError(error)}}
+async function scanForm(){const url=$("formUrl").value.trim();cancelCountdown();if(activeJob())return;if(state.access?.locked){openKeyModal("Bạn đã dùng hết 10 lượt miễn phí.");return}if(!validLink(url)){status(url?"Vui lòng nhập link Google Form hợp lệ.":"Hỗ trợ Google Forms công khai và link forms.gle",url?"error":"");return}const token=++state.scanToken;state.scanning=true;state.armed=true;state.schema=null;state.config={};$("formMeta").hidden=true;$("toolbar").hidden=true;$("fieldCount").textContent="Đang đọc...";$("questionList").innerHTML='<div class="loading-skeleton" aria-label="Đang đọc câu hỏi"></div>';status("Đang đọc câu hỏi và tất cả các trang...","loading");renderSummary();try{const result=await api("/api/scan",{url});if(token!==state.scanToken)return;state.scanId=result.scan_id;const poll=async()=>{if(token!==state.scanToken)return;try{const value=await api("/api/scans/"+state.scanId);if(token!==state.scanToken)return;if(value.status==="scanning"){setTimeout(poll,650);return}if(value.status==="error")throw Error(value.error);state.schema=value.schema;state.config=value.config;state.undo=[];$("undoRates").disabled=true;state.scanning=false;localStorage.setItem("formpilot.scan",state.scanId);localStorage.setItem("formpilot.url",url);renderQuestions();status("Đã đọc "+value.schema.question_count+" câu hỏi qua "+value.schema.pages.length+" trang.","success");scheduleAuto()}catch(error){if(token===state.scanToken)scanError(error)}};poll()}catch(error){if(token===state.scanToken)scanError(error)}}
 function scanError(error){state.scanning=false;state.schema=null;state.config={};state.armed=false;status(error.message,"error");$("fieldCount").textContent="0 câu hỏi";$("questionList").innerHTML=emptyMarkup;renderSummary();toast(error.message)}
-async function startJob(checkOnly){cancelCountdown();if(!ready()||activeJob())return;state.armed=false;try{const result=await api("/api/jobs",{scan_id:state.scanId,count:quantity(),config:state.config,delay:2,headless:!$("showBrowser").checked,mode:checkOnly?"check":"send"});localStorage.setItem("formpilot.job",result.job_id);state.keyUsed=Boolean(result.key_used);state.job={id:result.job_id,mode:result.mode,status:"queued",processed:0,total:result.mode==="check"?1:quantity(),events:[]};renderJob();pollJob()}catch(error){toast(error.message);renderSummary()}}
-async function pollJob(){if(!state.job)return;try{const value=await api("/api/jobs/"+state.job.id);state.job=value;renderJob();if(activeJob())state.pollTimer=setTimeout(pollJob,1000)}catch(error){toast(error.message);clearTimeout(state.pollTimer)}}
-function renderJob(){const job=state.job;if(!job)return;if(job.mode==="send")state.keyUsed=true;$("jobPanel").hidden=false;const labels={queued:"ĐANG CHUẨN BỊ",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+job.status;$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Google đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";renderSummary()}
+async function startJob(checkOnly){cancelCountdown();if(state.access?.locked){openKeyModal();return}if(!ready()||activeJob())return;state.armed=false;const count=quantity();try{const result=await api("/api/jobs",{scan_id:state.scanId,count,config:state.config,delay:2,headless:!$("showBrowser").checked,mode:checkOnly?"check":"send"});localStorage.setItem("formpilot.job",result.job_id);state.job={id:result.job_id,mode:result.mode,status:"queued",processed:0,total:result.mode==="check"?1:count,events:[]};renderJob();pollJob()}catch(error){toast(error.message);renderSummary()}}
+async function pollJob(){if(!state.job)return;try{state.job=await api("/api/jobs/"+state.job.id);await api("/api/auth/status");renderJob();if(activeJob())state.pollTimer=setTimeout(pollJob,1000)}catch(error){toast(error.message);clearTimeout(state.pollTimer)}}
+function renderJob(){const job=state.job;if(!job)return;$("jobPanel").hidden=false;const labels={queued:"ĐANG CHUẨN BỊ",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+job.status;$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Google đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";renderSummary()}
 $("formUrl").addEventListener("input",()=>{clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.armed=false;if(validLink($("formUrl").value.trim()))urlTimer=setTimeout(scanForm,850);else{state.schema=null;state.config={};state.scanning=false;$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link Google Form để bắt đầu.");renderSummary()}});
 $("scanAgain").addEventListener("click",scanForm);
 $("quantity").addEventListener("input",()=>{localStorage.setItem("formpilot.count",$("quantity").value);renderSummary();scheduleAuto()});
@@ -1549,22 +1596,39 @@ $("countdown").addEventListener("click",event=>{if(event.target.closest("#pauseA
 $("undoRates").addEventListener("click",undoRates);document.addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"&&!event.target.matches("input,textarea,select")){event.preventDefault();undoRates()}});
 $("searchQuestions").addEventListener("input",filterQuestions);$("pageFilter").addEventListener("change",filterQuestions);
 $("testButton").addEventListener("click",()=>startJob(true));
-$("startButton").addEventListener("click",async()=>{if(activeJob()){try{state.job=await api("/api/jobs/"+state.job.id+"/stop",{});renderJob()}catch(error){toast(error.message)}}else if(state.keyUsed){$("logoutKey").click()}else startJob(false)});
-async function init(){const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";try{const info=await api("/api/state");state.forceCheck=info.force_check;state.keyUsed=Boolean(info.key_used);$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ Python.","error")}renderSummary()}
-function lockAccess(message=""){
-clearInterval(state.autoTimer);clearTimeout(state.pollTimer);state.autoTimer=null;state.remaining=0;state.armed=false;state.keyUsed=false;state.job=null;state.schema=null;state.config={};state.scanId=null;
-$("workspaceApp").hidden=true;$("workspaceApp").inert=true;$("accessGate").hidden=false;document.body.classList.add("access-locked");
-$("questionList").innerHTML=emptyMarkup;$("formMeta").hidden=true;$("toolbar").hidden=true;$("jobPanel").hidden=true;$("fieldCount").textContent="0 câu hỏi";
-$("accessError").textContent=message;setTimeout(()=>$("accessKey").focus(),50);
+$("startButton").addEventListener("click",async()=>{if(activeJob()){try{state.job=await api("/api/jobs/"+state.job.id+"/stop",{});renderJob()}catch(error){toast(error.message)}}else if(state.access?.locked){openKeyModal()}else startJob(false)});
+async function init(){const oldCount=localStorage.getItem("formpilot.count");if(oldCount!==null&&Number.isInteger(Number(oldCount))&&Number(oldCount)>=0)$("quantity").value=oldCount;$("formUrl").value=localStorage.getItem("formpilot.url")||"";try{const info=await api("/api/state");state.forceCheck=info.force_check;if(info.plan!=="unlimited"&&(quantity()===null||quantity()===0||quantity()>info.remaining))$("quantity").value=Math.max(1,info.remaining);$("showBrowser").checked=info.headless_only?false:$("showBrowser").checked;$("showBrowser").disabled=Boolean(info.headless_only);$("showBrowser").closest("label").hidden=Boolean(info.headless_only);if(info.force_check){$("testButton").textContent="Máy chủ đang ở chế độ kiểm tra";$("startButton").title="Lượt chạy dừng trước nút Gửi"}const scanId=localStorage.getItem("formpilot.scan"),jobId=localStorage.getItem("formpilot.job");if(scanId){try{const scan=await api("/api/scans/"+scanId);if(scan.status==="ready"){state.scanId=scanId;state.schema=scan.schema;state.config=scan.config;try{const draft=JSON.parse(localStorage.getItem("formpilot.draft")||"null");if(draft&&draft.scanId===scanId&&Object.keys(draft.config).length===scan.schema.fields.length)state.config=draft.config}catch{}renderQuestions();status("Biểu mẫu đã sẵn sàng. Không tự chạy khi tải lại trang.","success")}}catch{localStorage.removeItem("formpilot.scan")}}if(jobId){try{state.job=await api("/api/jobs/"+jobId);renderJob();if(activeJob())pollJob()}catch{localStorage.removeItem("formpilot.job")}}}catch(error){status("Chưa kết nối được máy chủ. Vui lòng tải lại trang.","error");$("usageDetail").textContent="Chưa kết nối được máy chủ. Vui lòng thử tải lại trang."}renderSummary()}
+let keyReturnFocus=null;
+function applyAccess(info){
+state.access=info;
+const unlimited=info.plan==="unlimited",locked=Boolean(info.locked),strip=document.querySelector(".usage-strip");
+strip.classList.toggle("is-locked",locked);strip.classList.toggle("is-unlimited",unlimited);
+$("planLabel").textContent=unlimited?"Unlimited đã mở khóa":locked?"Bạn đã dùng hết 10 lượt miễn phí":"Bạn còn "+info.remaining+" lượt miễn phí";
+$("usageDetail").textContent=unlimited?"Không giới hạn số lượt và số đợt chạy. Key dùng lại được.":locked?"Nhập key để tiếp tục. Mua key unlimited 30.000đ/key qua Facebook hoặc Zalo.":"Tự đọc form và điền thử không trừ lượt. Hạn mức được giữ khi tải lại trang.";
+$("usageCount").textContent=unlimited?"∞ · Không giới hạn":info.used+" / "+info.free_limit+" lượt đã dùng";
+$("usageProgress").max=info.free_limit;$("usageProgress").value=info.used;$("usageProgress").hidden=unlimited;
+$("upgradeButton").innerHTML=(unlimited?"Quản lý key":"Mở khóa unlimited")+" "+icon("arrow");
+$("logoutKey").querySelector("span").textContent=unlimited?"Unlimited":"Nhập key";
+$("logoutKey").title=unlimited?"Key: "+info.key_name:"Nhập key unlimited";
+$("paidKeyControls").hidden=!unlimited;$("quantity").min=unlimited?"0":"1";
+if(unlimited)$("quantity").removeAttribute("max");else $("quantity").max=Math.max(1,info.remaining);
+$("quantityHint").textContent=unlimited?"Nhập 0 để chạy liên tục":"Còn "+info.remaining+" / "+info.free_limit+" lượt miễn phí";
+if(locked)cancelCountdown();renderSummary();
+}
+function openKeyModal(message=""){
+clearTimeout(urlTimer);cancelCountdown();state.armed=false;keyReturnFocus=document.activeElement;
+$("accessError").textContent=message;$("accessKey").removeAttribute("aria-invalid");
+$("accessGate").hidden=false;$("workspaceApp").inert=true;document.body.classList.add("modal-open");
+setTimeout(()=>$("accessKey").focus(),30);
+}
+function closeKeyModal(){
+$("accessGate").hidden=true;$("workspaceApp").inert=false;document.body.classList.remove("modal-open");
+if(keyReturnFocus?.isConnected)keyReturnFocus.focus();
 }
 async function unlockAccess(info){
-$("accessGate").hidden=true;$("workspaceApp").hidden=false;$("workspaceApp").inert=false;document.body.classList.remove("access-locked");
-$("accessError").textContent="";$("accessKey").value="";$("accessKey").removeAttribute("aria-invalid");$("logoutKey").title="Key: "+info.key_name+" · Đổi key";
-await init();
+applyAccess(info);$("accessKey").value="";$("accessError").textContent="";closeKeyModal();toast("Đã mở khóa unlimited. Bạn có thể chạy nhiều đợt bằng key này.");
 }
-function authInit(){
-try{for(const name of ["formpilot.scan","formpilot.job","formpilot.draft"])localStorage.removeItem(name)}catch{}lockAccess();
-}
+function authInit(){init()}
 function normalizeKey(value){
 const text=String(value||"").normalize("NFKC").replace(/[‐‑‒–—―−﹣－]/g,"-").replace(/[\s\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g,"").toUpperCase();
 const match=text.match(/KD-?([0-9A-F]{8})-?([0-9A-F]{8})-?([0-9A-F]{8})-?([0-9A-F]{8})(?![0-9A-F])/);
@@ -1578,7 +1642,11 @@ try{const info=await api("/api/auth/login",{key});await unlockAccess(info)}catch
 $("accessKey").addEventListener("paste",event=>{const key=normalizeKey(event.clipboardData?.getData("text")||"");if(/^KD-(?:[0-9A-F]{8}-){3}[0-9A-F]{8}$/.test(key)){event.preventDefault();$("accessKey").value=key;$("accessKey").dispatchEvent(new Event("input",{bubbles:true}))}});
 $("accessKey").addEventListener("input",()=>{$("accessKey").removeAttribute("aria-invalid");$("accessError").textContent=""});
 $("toggleKey").addEventListener("click",()=>{const show=$("accessKey").type==="password";$("accessKey").type=show?"text":"password";$("toggleKey").textContent=show?"Ẩn":"Hiện";$("toggleKey").setAttribute("aria-pressed",String(show));$("accessKey").focus()});
-$("logoutKey").addEventListener("click",async()=>{try{await api("/api/auth/logout",{});lockAccess()}catch(error){toast(error.message)}});
+for(const id of ["logoutKey","upgradeButton","heroUpgrade"])$(id).addEventListener("click",()=>openKeyModal());
+$("closeKey").addEventListener("click",closeKeyModal);
+$("accessGate").addEventListener("click",event=>{if(event.target===$("accessGate"))closeKeyModal()});
+$("deactivateKey").addEventListener("click",async()=>{try{await api("/api/auth/logout",{});closeKeyModal();toast("Đã ngừng dùng key trên trình duyệt này. Key vẫn có thể nhập lại.")}catch(error){toast(error.message)}});
+document.addEventListener("keydown",event=>{if($("accessGate").hidden)return;if(event.key==="Escape"){event.preventDefault();closeKeyModal()}if(event.key==="Tab"){const nodes=[...$("accessGate").querySelectorAll("button,a[href],input")].filter(el=>!el.disabled&&el.getClientRects().length);const first=nodes[0],last=nodes[nodes.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}}});
 
 window.addEventListener("beforeunload",()=>{clearInterval(state.autoTimer);clearTimeout(state.pollTimer)});window.addEventListener("pageshow",event=>{if(event.persisted)location.reload()});authInit();
 </script>
@@ -1823,7 +1891,7 @@ class WebApplication:
             job = self.jobs.get(job_id)
             if job is None:
                 raise FormError("Không tìm thấy lượt chạy.")
-            return json.loads(json.dumps({key: value for key, value in job.items() if key not in ("stop_event", "schema", "config", "access_key_hash", "access_activation_id")}, ensure_ascii=False))
+            return json.loads(json.dumps({key: value for key, value in job.items() if key not in ("stop_event", "schema", "config", "access_key_hash", "access_activation_id", "owner_id", "guest_id")}, ensure_ascii=False))
 
     def event(self, job, message, level="info"):
         with self.lock:
@@ -1854,6 +1922,7 @@ class WebApplication:
                "headless": self.headless_only or bool(payload.get("headless", True)), "stop_event": threading.Event(),
                "created_at": time.time(), "updated_at": time.time(), "title": state["schema"]["title"],
                "seed": secrets.randbits(48), "access_key_id": payload.get("_key_id"),
+               "owner_id": payload.get("_owner_id"), "guest_id": payload.get("_guest_id"),
                "access_activation_id": payload.get("_activation_id", ""),
                "access_key_hash": payload.get("_key_hash", ""), "exact": count > 0 and not state["schema"]["branching"]
                and not any(field["exclusive_columns"] for field in state["schema"]["fields"])}
@@ -1862,26 +1931,26 @@ class WebApplication:
                 raise FormError("Máy chủ đang đọc form. Vui lòng chờ đọc xong rồi bắt đầu.")
             if any(item["status"] in ("queued", "running", "stopping") for item in self.jobs.values()):
                 raise FormError("Một lượt chạy đang hoạt động. Hãy dừng hoặc chờ hoàn tất.")
+            if not job["owner_id"] or not active_job_key(job, self.key_store):
+                raise FormError("Phiên sử dụng không hợp lệ. Vui lòng tải lại trang.")
             if not job["access_key_id"]:
-                raise FormError("Vui lòng nhập key hợp lệ trước khi bắt đầu.")
-            if mode == "send":
+                usage = self.key_store.guest_usage(job["guest_id"])
+                if not usage["remaining"]:
+                    raise QuotaExceeded("Bạn đã dùng hết 10 lượt miễn phí. Mua key unlimited 30.000đ/key để tiếp tục.")
+                if mode == "send" and (count == 0 or count > usage["remaining"]):
+                    raise QuotaExceeded(f'Bạn còn {usage["remaining"]} lượt miễn phí. Giảm số lượng hoặc nhập key unlimited.')
+            elif mode == "send":
                 self.key_store.claim(job["access_key_id"], job["access_key_hash"], job_id, job["access_activation_id"])
-            else:
-                item = self.key_store.get(job["access_key_id"])
-                if (not item or not item["enabled"] or item["claimed_job"]
-                        or not secrets.compare_digest(item["sha256"], job["access_key_hash"])
-                        or not secrets.compare_digest(str(item["activation_id"] or ""), job["access_activation_id"])):
-                    raise KeyAlreadyUsed("Key đã dùng. Vui lòng nhập key mới.")
             self.jobs[job_id] = job
             self.scans[state["id"]]["config"] = config
         try:
             threading.Thread(target=self.run_job, args=(job,), daemon=True).start()
         except RuntimeError as exc:
             job.update(status="error", error="Không khởi động được đợt chạy.")
-            if mode == "send":
+            if mode == "send" and job["access_key_id"]:
                 self.key_store.finish(job["access_key_id"], job["access_key_hash"], job_id, "error")
-            raise FormError("Không khởi động được đợt chạy. Key đã được giữ cho đợt này; hãy cấp key mới.") from exc
-        return {"job_id": job_id, "mode": mode, "key_used": mode == "send"}
+            raise FormError("Không khởi động được đợt chạy. Chưa gửi phản hồi; bạn có thể thử lại.") from exc
+        return {"job_id": job_id, "mode": mode, "key_used": False}
 
     def run_job(self, job):
         try:
@@ -1891,11 +1960,11 @@ class WebApplication:
                 job.update(status="error", error=str(exc), current_question="")
             self.event(job, str(exc), "error")
         finally:
-            if job["mode"] == "send":
+            if job["mode"] == "send" and job["access_key_id"]:
                 try:
                     self.key_store.finish(job["access_key_id"], job["access_key_hash"], job["id"], job["status"])
                 except FormError:
-                    self.event(job, "Chưa cập nhật được kết quả vào kho key. Key vẫn đã được ghi nhận sử dụng.", "warning")
+                    self.event(job, "Chưa cập nhật được kết quả vào kho key. Kiểm tra kết nối CSDL.", "warning")
 
     def _run_job(self, job):
         schema, stop = job["schema"], job["stop_event"]
@@ -1941,6 +2010,8 @@ class WebApplication:
                     log.write({"event": "filled", "index": index, "report": report,
                                "answers": answers, "profile": sampler.last_profile})
                     if job["mode"] == "send":
+                        if not job["access_key_id"]:
+                            self.key_store.consume_guest(job["guest_id"])
                         log.write({"event": "started", "index": index})
                         try:
                             browser.submit(schema)
@@ -2043,18 +2114,39 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
             suffix = "; Secure" if settings["secure_cookie"] else ""
             return f"kd_access={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict{suffix}"
 
+        def guest_identity(self):
+            from http.cookies import SimpleCookie, CookieError
+            try:
+                cookie = SimpleCookie()
+                cookie.load(self.headers.get("Cookie") or "")
+                raw = cookie["kd_guest"].value if "kd_guest" in cookie else ""
+            except CookieError:
+                return None
+            return hashlib.sha256(raw.encode()).hexdigest() if re.fullmatch(r"[A-Za-z0-9_-]{43}", raw) else None
+
+        def access_state(self, session):
+            usage = key_store.guest_usage(session["guest_id"])
+            paid = bool(session.get("key_id"))
+            return {"authenticated": paid, "plan": "unlimited" if paid else "free",
+                    "key_name": session.get("key_id"), "key_used": False,
+                    "free_limit": FREE_LIMIT, "used": usage["used"], "remaining": usage["remaining"],
+                    "locked": not paid and usage["remaining"] == 0}
+
         def require_access(self):
-            session = access.current(self.headers.get("Cookie"))
-            if session is None:
-                self.reply(401, {"error": "Vui lòng nhập key hợp lệ để sử dụng công cụ."})
-            return session
+            guest_id = self.guest_identity()
+            if not guest_id or key_store.guest_usage(guest_id) is None:
+                self.reply(401, {"error": "Vui lòng mở lại trang chủ để bắt đầu sử dụng."})
+                return None
+            paid = access.current(self.headers.get("Cookie"))
+            return {"key_id": None, "key_hash": "", "activation_id": "", "key_used": False,
+                    **(paid or {}), "guest_id": guest_id, "owner_id": guest_id}
 
         def require_owner(self, kind, identifier, session):
             with app.lock:
                 collection = app.scans if kind == "scan" else app.jobs
                 value = collection.get(identifier)
-                if value is None or value.get("access_key_id") != session["key_id"]:
-                    raise FormError("Không tìm thấy dữ liệu thuộc key đang sử dụng.")
+                if value is None or value.get("owner_id") != session["owner_id"]:
+                    raise FormError("Không tìm thấy dữ liệu thuộc trình duyệt đang sử dụng.")
 
         def do_GET(self):
             path = urlsplit(self.path).path
@@ -2063,22 +2155,28 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     self.reply(200, {"ok": True, "name": "KDautoform"})
                     return
                 if path == "/":
-                    # F5 hoặc mở lại trang: hủy phiên cũ trên máy chủ và xóa cookie đăng nhập.
-                    access.logout(self.headers.get("Cookie"))
+                    guest_id = self.guest_identity()
+                    headers = {}
+                    if not guest_id or key_store.guest_usage(guest_id) is None:
+                        raw = secrets.token_urlsafe(32)
+                        guest_id = hashlib.sha256(raw.encode()).hexdigest()
+                        key_store.ensure_guest(guest_id)
+                        suffix = "; Secure" if settings["secure_cookie"] else ""
+                        headers["Set-Cookie"] = f"kd_guest={raw}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict{suffix}"
                     self.reply(200, live_settings()["html"].replace("__APP_TOKEN__", app.token), "text/html; charset=utf-8",
-                               headers={"Set-Cookie": self.access_cookie("", 0)})
+                               headers=headers)
                     return
                 if path == "/api/auth/status":
-                    session = access.current(self.headers.get("Cookie"))
-                    self.reply(200, {"authenticated": bool(session),
-                                     "key_name": session["key_id"] if session else None,
-                                     "key_used": session["key_used"] if session else False})
+                    session = self.require_access()
+                    if session is not None:
+                        self.reply(200, self.access_state(session))
                     return
                 session = self.require_access()
                 if session is None:
                     return
                 if path == "/api/state":
-                    self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only, "version": "4.1", "name": "KDautoform", "key_used": session["key_used"]})
+                    self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only,
+                                     "version": "5.0", "name": "KDautoform", **self.access_state(session)})
                 elif path.startswith("/api/scans/"):
                     scan_id = path.rsplit("/", 1)[-1]
                     self.require_owner("scan", scan_id, session)
@@ -2126,6 +2224,9 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     raise FormError("Dữ liệu yêu cầu không hợp lệ.")
                 path = urlsplit(self.path).path
                 if path == "/api/auth/login":
+                    session = self.require_access()
+                    if session is None:
+                        return
                     key = payload.get("key", "")
                     if not isinstance(key, str) or len(key) > 256:
                         raise FormError("Định dạng key không hợp lệ.")
@@ -2134,40 +2235,48 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                         self.reply(429, {"error": f"Bạn đã nhập sai nhiều lần. Thử lại sau {retry} giây."},
                                    headers={"Retry-After": str(retry)})
                     elif token:
-                        self.reply(200, {"authenticated": True, "key_name": record["key_id"]},
+                        self.reply(200, self.access_state({**session, **record}),
                                    headers={"Set-Cookie": self.access_cookie(token, 43200)})
                     else:
-                        self.reply(401, {"error": "Key không đúng, đã bị khóa hoặc đã kích hoạt trước đó. Vui lòng dùng key mới."})
+                        self.reply(401, {"error": "Key không đúng, đã bị khóa hoặc là key một lần của phiên bản cũ."})
                     return
                 if path == "/api/auth/logout":
+                    session = self.require_access()
+                    if session is None:
+                        return
                     access.logout(self.headers.get("Cookie"))
-                    self.reply(200, {"authenticated": False}, headers={
+                    session["key_id"] = None
+                    self.reply(200, self.access_state(session), headers={
                         "Set-Cookie": self.access_cookie("", 0)})
                     return
                 session = self.require_access()
                 if session is None:
                     return
                 if path == "/api/scan":
-                    if session["key_used"]:
-                        raise KeyAlreadyUsed("Key đã dùng. Vui lòng nhập key mới để đọc và chạy form khác.")
+                    if self.access_state(session)["locked"]:
+                        raise QuotaExceeded("Bạn đã dùng hết 10 lượt miễn phí. Mua key unlimited 30.000đ/key để tiếp tục.")
                     result = app.scan(str(payload.get("url", "")))
                     with app.lock:
-                        app.scans[result["scan_id"]]["access_key_id"] = session["key_id"]
+                        app.scans[result["scan_id"]]["owner_id"] = session["owner_id"]
                     self.reply(202, result)
                 elif path == "/api/jobs":
                     self.require_owner("scan", str(payload.get("scan_id", "")), session)
                     payload["_key_id"] = session["key_id"]
                     payload["_key_hash"] = session["key_hash"]
                     payload["_activation_id"] = session["activation_id"]
-                    self.reply(202, app.start_job(payload))
+                    payload["_guest_id"] = session["guest_id"]
+                    payload["_owner_id"] = session["owner_id"]
+                    self.reply(202, {**app.start_job(payload), **self.access_state(session)})
                 elif path.startswith("/api/jobs/") and path.endswith("/stop"):
                     job_id = path.split("/")[3]
                     self.require_owner("job", job_id, session)
                     self.reply(200, app.stop_job(job_id))
                 else:
                     self.reply(404, {"error": "Không tìm thấy thao tác."})
+            except QuotaExceeded as exc:
+                self.reply(402, {"error": str(exc), **self.access_state(session)})
             except KeyAlreadyUsed as exc:
-                self.reply(409, {"error": str(exc), "key_used": True})
+                self.reply(403, {"error": str(exc)})
             except (FormError, ValueError, TypeError, KeyError) as exc:
                 self.reply(400, {"error": str(exc)})
             except (BrokenPipeError, ConnectionResetError):
@@ -2224,8 +2333,8 @@ def cli(argv=None):
     parser.add_argument("--no-open", action="store_true", help="Không tự mở giao diện")
     parser.add_argument("--ux-report", action="store_true", help="Xem các nguyên lý UI/UX đã áp dụng")
     key_commands = parser.add_mutually_exclusive_group()
-    key_commands.add_argument("--key-list", action="store_true", help="Xem danh sách key và trạng thái 0/1 hoặc 1/1")
-    key_commands.add_argument("--key-generate", type=int, nargs="?", const=1, metavar="SO_LUONG", help="Tạo key ngẫu nhiên và lưu CSV; mặc định 1")
+    key_commands.add_argument("--key-list", action="store_true", help="Xem danh sách key unlimited, key cũ và trạng thái khóa")
+    key_commands.add_argument("--key-generate", type=int, nargs="?", const=1, metavar="SO_LUONG", help="Tạo key unlimited ngẫu nhiên và lưu CSV; mặc định 1")
     key_commands.add_argument("--key-paths", action="store_true", help="Xem vị trí kho key và thư mục CSV riêng tư")
     key_commands.add_argument("--key-add", metavar="TEN", help="Tạo và lưu key mới")
     key_commands.add_argument("--key-rotate", metavar="TEN", help="Đổi mã của một key")
