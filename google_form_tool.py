@@ -333,7 +333,30 @@ class KeyStore:
         self.cache_lock = threading.RLock()
         self.cache = {}
         self.guest_cache = {}
-        self.initialize(legacy or {})
+        self._closed = False
+        self._pool = None
+        if self.database_url:
+            from database_pool import ConnectionPool
+            database_url = self.database_url
+            def open_postgres():
+                try:
+                    import psycopg
+                    from psycopg.rows import dict_row
+                except ImportError as exc:
+                    raise FormError("Cài thư viện PostgreSQL: python -m pip install -r requirements.txt") from exc
+                return psycopg.connect(database_url, connect_timeout=15,
+                                       tcp_user_timeout=15000, prepare_threshold=None, row_factory=dict_row)
+            self._pool = ConnectionPool(open_postgres, max_size=4)
+        try:
+            self.initialize(legacy or {})
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        self._closed = True
+        if self._pool is not None:
+            self._pool.close()
 
     def connection(self):
         from contextlib import contextmanager
@@ -341,14 +364,10 @@ class KeyStore:
         @contextmanager
         def connect():
             connection = None
+            broken = False
             try:
                 if self.database_url:
-                    try:
-                        import psycopg
-                        from psycopg.rows import dict_row
-                    except ImportError as exc:
-                        raise FormError("Cài thư viện PostgreSQL: python -m pip install -r requirements.txt") from exc
-                    connection = psycopg.connect(self.database_url, connect_timeout=15, row_factory=dict_row)
+                    connection = self._pool.acquire()
                 else:
                     import sqlite3
                     self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -356,18 +375,38 @@ class KeyStore:
                     connection.row_factory = sqlite3.Row
                     os.chmod(self.path, 0o600)
                 yield connection
-                connection.commit()
+                try:
+                    connection.commit()
+                except BaseException:
+                    broken = True
+                    raise
             except FormError:
                 if connection is not None:
-                    connection.rollback()
+                    try:
+                        connection.rollback()
+                    except BaseException:
+                        broken = True
                 raise
             except Exception as exc:
                 if connection is not None:
-                    connection.rollback()
+                    try:
+                        connection.rollback()
+                    except BaseException:
+                        broken = True
                 raise FormError("Không truy cập được kho key. Kiểm tra đường dẫn hoặc kết nối CSDL; thao tác đã dừng.") from exc
+            except BaseException:
+                if connection is not None:
+                    try:
+                        connection.rollback()
+                    except BaseException:
+                        broken = True
+                raise
             finally:
                 if connection is not None:
-                    connection.close()
+                    if self._pool is not None:
+                        self._pool.release(connection, broken=broken)
+                    else:
+                        connection.close()
 
         return connect()
 
@@ -588,7 +627,8 @@ def configured_key_store():
     if cloud and not database_url:
         raise FormError("Cloud cần KD_DATABASE_URL trỏ tới PostgreSQL để nhớ key đã dùng qua các lần restart/deploy. Xem README.")
     config = (database_url, os.environ.get("KD_KEY_DB_PATH"), os.environ.get("KD_KEY_EXPORT_DIR"))
-    if _KEY_STORE_CACHE["config"] != config:
+    if (_KEY_STORE_CACHE["config"] != config or _KEY_STORE_CACHE["store"] is None
+            or _KEY_STORE_CACHE["store"]._closed):
         store = KeyStore(database_url=database_url, legacy={} if database_url else live_settings()["keys"])
         _KEY_STORE_CACHE.update(config=config, store=store)
     return _KEY_STORE_CACHE["store"]
@@ -1673,12 +1713,13 @@ main{max-width:1260px;padding:42px 34px 48px;margin:auto}.intro{display:flex;jus
 <div class="setup-bottom"><div id="scanStatus" class="scan-status" role="status" aria-live="polite"><svg class="icon"><use href="#i-shield"/></svg><span>Google Forms và Microsoft Forms công khai</span></div><span id="quantityHint" class="setup-tip">Tối đa 10 lượt miễn phí</span></div><p id="quantityError" class="quantity-error" role="status" hidden></p>
 <details class="run-settings" open><summary>Tốc độ, thời gian chạy &amp; tái tạo dữ liệu</summary><div class="run-options">
 <div><label class="label" for="engineMode">Cách điền Google Forms</label><select id="engineMode"><option value="fast">Nhanh · điền theo trang</option><option value="compatible">Tương thích · từng câu</option></select></div>
-<div><label class="label" for="timingPreset">Nhịp bắt đầu mỗi lượt</label><select id="timingPreset"><option value="fast">Nhanh nhất · nhịp 2 giây</option><option value="fixed3">Mỗi 3 giây</option><option value="fixed30">Mỗi 30 giây</option><option value="fixed60">Mỗi 1 phút · 60 giây</option><option value="random30_180">Ngẫu nhiên · 30 giây–3 phút</option><option value="fixed180">Cố định · 3 phút</option><option value="custom_fixed">Tùy chỉnh · cố định</option><option value="custom_random">Tùy chỉnh · trong khoảng</option></select></div>
+<div><label class="label" for="timingPreset">Tốc độ yêu cầu</label><select id="timingPreset"><option value="maximum">Tối đa · không chờ thêm</option><option value="fast" selected>Nhịp 2 giây</option><option value="fixed3">Mỗi 3 giây</option><option value="fixed30">Mỗi 30 giây</option><option value="fixed60">Mỗi 1 phút · 60 giây</option><option value="random30_180">Ngẫu nhiên · 30 giây–3 phút</option><option value="fixed180">Cố định · 3 phút</option><option value="custom_fixed">Tùy chỉnh · cố định</option><option value="custom_random">Tùy chỉnh · trong khoảng</option></select></div>
+<div><label class="label" for="timingBasis">Cách tính khoảng cách</label><select id="timingBasis"><option value="start">Giữa hai lần bắt đầu</option><option value="completion">Nghỉ sau khi hoàn tất</option></select></div>
 <div><label class="label" for="intervalMin">Từ / cố định (giây)</label><input id="intervalMin" type="number" min="0" max="86400" step="1" value="2"></div>
 <div><label class="label" for="intervalMax">Đến (giây)</label><input id="intervalMax" type="number" min="0" max="86400" step="1" value="2" disabled></div>
 <div><label class="label" for="sampleSeed">Seed tái tạo dữ liệu</label><input id="sampleSeed" type="number" min="0" max="9007199254740991" step="1" placeholder="Để trống: ngẫu nhiên"></div>
 <div><label class="label" for="referenceDate">Ngày tham chiếu</label><input id="referenceDate" type="date" min="1900-01-01" max="2100-12-31"></div></div>
-<p class="run-hint">Lượt đầu bắt đầu khi đến lượt trong hàng đợi. Khoảng gửi tính giữa hai lần bắt đầu; form dài sẽ được điền xong trước khi chạy lượt tiếp theo.</p><p class="run-hint">Thời gian hoàn tất phụ thuộc form và mạng. Nhịp 2 giây không bảo đảm điền xong trong 2 giây. Giữ cùng seed, cấu hình và ngày tham chiếu để lặp lại dữ liệu.</p><p id="serverCapacity" class="run-hint" role="status"></p><p id="durationEstimate" class="duration-estimate" aria-live="polite"></p><p id="runOptionsError" class="quantity-error" role="status" hidden></p></details>
+<p id="pacingHint" class="run-hint">Lượt đầu bắt đầu khi đến lượt trong hàng đợi. Mỗi form được điền xong trước khi chạy lượt tiếp theo.</p><p class="run-hint">Thời gian hoàn tất phụ thuộc form và mạng. Nhịp 2 giây không bảo đảm điền xong trong 2 giây. Chọn Tối đa để bỏ thời gian chờ thêm. Giữ cùng seed, cấu hình và ngày tham chiếu để lặp lại dữ liệu.</p><p id="serverCapacity" class="run-hint" role="status"></p><p id="durationEstimate" class="duration-estimate" aria-live="polite"></p><p id="runOptionsError" class="quantity-error" role="status" hidden></p></details>
 </section>
 <div class="workspace">
 <section class="questions" aria-labelledby="ratioTitle">
@@ -1740,13 +1781,13 @@ function status(text,kind=""){const node=$("scanStatus");node.className="scan-st
 function quantity(){const raw=$("quantity").value.trim();if(raw==="")return null;const value=Number(raw);return Number.isInteger(value)&&value>=0?value:null}
 function fieldValid(field){const entry=state.config[field.id];if(!entry)return false;if(field.options.length){const values=field.options.map(option=>Number(entry.rates[option]));if(values.some(value=>!Number.isFinite(value)||value<0||value>100))return false;const sum=values.reduce((a,b)=>a+b,0);return ["multiple","grid_multiple"].includes(field.kind)?sum>=field.minimum*100-.001&&sum<=field.maximum*100+.001:Math.abs(sum-100)<.001}return entry.mode!=="fixed"||Boolean(entry.value.trim())}
 function allowedCount(){const n=quantity();return n!==null&&Boolean(state.access)&&(state.access.plan==="unlimited"||(n>0&&n<=state.access.remaining))}
-function runSchedule(){const mode=["random30_180","custom_random"].includes($("timingPreset").value)?"random":"fixed",minRaw=$("intervalMin").value.trim(),maxRaw=$("intervalMax").value.trim(),minimum=Number(minRaw),maximum=mode==="fixed"?minimum:Number(maxRaw);if(!minRaw||(mode==="random"&&!maxRaw)||![minimum,maximum].every(n=>Number.isFinite(n)&&n>=0&&n<=86400)||maximum<minimum)return null;return {mode,min_seconds:minimum,max_seconds:maximum}}
+function runSchedule(){const mode=["random30_180","custom_random"].includes($("timingPreset").value)?"random":"fixed",minRaw=$("intervalMin").value.trim(),maxRaw=$("intervalMax").value.trim(),minimum=Number(minRaw),maximum=mode==="fixed"?minimum:Number(maxRaw);if(!minRaw||(mode==="random"&&!maxRaw)||![minimum,maximum].every(n=>Number.isFinite(n)&&n>=0&&n<=86400)||maximum<minimum)return null;return {mode,min_seconds:minimum,max_seconds:maximum,basis:$("timingBasis").value}}
 function runSeed(){const raw=$("sampleSeed").value.trim();if(!raw)return null;const value=Number(raw);return Number.isSafeInteger(value)&&value>=0?value:undefined}
 function runReferenceDate(){const el=$("referenceDate");return el.value&&el.validity.valid?el.value:null}
 function formatDuration(value){if(!Number.isFinite(value))return "—";let seconds=Math.max(0,Math.ceil(value)),hours=Math.floor(seconds/3600);seconds%=3600;const minutes=Math.floor(seconds/60);seconds%=60;return (hours?hours+" giờ ":"")+(minutes?minutes+" phút ":"")+(seconds||(!hours&&!minutes)?seconds+" giây":"")}
-function updateRunOptions(){const schedule=runSchedule(),seed=runSeed(),active=Boolean(activeJob());for(const id of ["timingPreset","intervalMin","sampleSeed","referenceDate"])$(id).disabled=active;$("intervalMax").disabled=active||!["random30_180","custom_random"].includes($("timingPreset").value);$("engineMode").disabled=active||state.providerMode!=="google";const error=!schedule?"Chọn khoảng thời gian hợp lệ từ 0 đến 86.400 giây; giá trị Đến không được nhỏ hơn Từ.":seed===undefined?"Seed cần là số nguyên không âm, tối đa 9007199254740991.":!runReferenceDate()?"Chọn ngày tham chiếu hợp lệ để tái tạo dữ liệu.":"";$("runOptionsError").hidden=!error;$("runOptionsError").textContent=error;const n=quantity();$("durationEstimate").textContent=!schedule||n===null?"":n===0?"Chạy liên tục đến khi bạn dừng.":n===1?"Một lượt được xử lý khi đến vị trí trong hàng đợi.":"Nhịp gửi dự kiến: "+formatDuration((n-1)*schedule.min_seconds)+(schedule.max_seconds!==schedule.min_seconds?" – "+formatDuration((n-1)*schedule.max_seconds):"")+". Form dài có thể cần thêm thời gian."}
-function persistRunOptions(){localStorage.setItem("formpilot.runOptions",JSON.stringify({engine:$("engineMode").value,preset:$("timingPreset").value,min:$("intervalMin").value,max:$("intervalMax").value,seed:$("sampleSeed").value,referenceDate:$("referenceDate").value}))}
-function restoreRunOptions(){const today=new Date();$("referenceDate").value=today.getFullYear()+"-"+String(today.getMonth()+1).padStart(2,"0")+"-"+String(today.getDate()).padStart(2,"0");try{const saved=JSON.parse(localStorage.getItem("formpilot.runOptions")||"null");if(saved){if(["fast","compatible"].includes(saved.engine))$("engineMode").value=saved.engine;if([...$("timingPreset").options].some(o=>o.value===saved.preset))$("timingPreset").value=saved.preset;for(const [id,key] of [["intervalMin","min"],["intervalMax","max"],["sampleSeed","seed"],["referenceDate","referenceDate"]])if(saved[key]!==undefined)$(id).value=saved[key]}}catch{}updateRunOptions()}
+function updateRunOptions(){const schedule=runSchedule(),seed=runSeed(),active=Boolean(activeJob());for(const id of ["timingPreset","timingBasis","intervalMin","sampleSeed","referenceDate"])$(id).disabled=active;$("intervalMax").disabled=active||!["random30_180","custom_random"].includes($("timingPreset").value);$("engineMode").disabled=active||state.providerMode!=="google";const error=!schedule?"Chọn khoảng thời gian hợp lệ từ 0 đến 86.400 giây; giá trị Đến không được nhỏ hơn Từ.":seed===undefined?"Seed cần là số nguyên không âm, tối đa 9007199254740991.":!runReferenceDate()?"Chọn ngày tham chiếu hợp lệ để tái tạo dữ liệu.":"";$("runOptionsError").hidden=!error;$("runOptionsError").textContent=error;const n=quantity(),measured=state.job?.average_response_seconds;const basis=schedule?.basis==="completion";$("pacingHint").textContent=basis?"Nghỉ đủ số giây đã chọn sau khi hoàn tất form, rồi trở lại hàng đợi.":"Khoảng cách tính giữa hai lần bắt đầu. Form lâu hơn nhịp đặt sẽ được điền xong trước; không chạy dồn để bù trễ.";const eta=(interval)=>measured?(basis?n*measured+(n-1)*interval:measured+(n-1)*Math.max(measured,interval)):(n-1)*interval;$("durationEstimate").textContent=!schedule||n===null?"":n===0?"Chạy liên tục đến khi bạn dừng.":n===1?"Một lượt được xử lý khi đến vị trí trong hàng đợi.":(measured?"Ước tính theo tốc độ vừa đo: ":"Tổng khoảng chờ/nhịp tối thiểu: ")+formatDuration(eta(schedule.min_seconds))+(schedule.max_seconds!==schedule.min_seconds?" – "+formatDuration(eta(schedule.max_seconds)):"")+(measured?". Chưa tính chờ người khác trong hàng đợi.":". Chưa gồm toàn bộ thời gian xử lý form và hàng đợi.")}
+function persistRunOptions(){localStorage.setItem("formpilot.runOptions",JSON.stringify({engine:$("engineMode").value,preset:$("timingPreset").value,basis:$("timingBasis").value,min:$("intervalMin").value,max:$("intervalMax").value,seed:$("sampleSeed").value,referenceDate:$("referenceDate").value}))}
+function restoreRunOptions(){const today=new Date();$("referenceDate").value=today.getFullYear()+"-"+String(today.getMonth()+1).padStart(2,"0")+"-"+String(today.getDate()).padStart(2,"0");try{const saved=JSON.parse(localStorage.getItem("formpilot.runOptions")||"null");if(saved){if(["start","completion"].includes(saved.basis))$("timingBasis").value=saved.basis;if(["fast","compatible"].includes(saved.engine))$("engineMode").value=saved.engine;if([...$("timingPreset").options].some(o=>o.value===saved.preset))$("timingPreset").value=saved.preset;for(const [id,key] of [["intervalMin","min"],["intervalMax","max"],["sampleSeed","seed"],["referenceDate","referenceDate"]])if(saved[key]!==undefined)$(id).value=saved[key]}}catch{}updateRunOptions()}
 function ready(){return Boolean(state.access)&&!state.access.locked&&Boolean(state.schema)&&!state.scanning&&allowedCount()&&Boolean(runSchedule())&&runSeed()!==undefined&&Boolean(runReferenceDate())&&state.schema.fields.every(fieldValid)}
 function apportion(weights,total=100){const sum=weights.reduce((a,b)=>a+b,0);if(!sum)return weights.map((_,i)=>i===0?total:0);const ideal=weights.map(v=>v/sum*total),values=ideal.map(Math.floor);const order=values.map((_,i)=>i).sort((a,b)=>(ideal[b]-values[b])-(ideal[a]-values[a]));const left=total-values.reduce((a,b)=>a+b,0);for(let i=0;i<left;i++)values[order[i]]++;return values}
 function fold(value){return String(value).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/đ/g,"d")}
@@ -1773,7 +1814,7 @@ async function startJob(checkOnly){cancelCountdown();if(state.access?.locked){op
 function queuePoll(delay){clearTimeout(state.pollTimer);state.pollTimer=setTimeout(pollJob,delay)}
 async function pollJob(){if(!state.job)return;if(state.polling){queuePoll(500);return;}clearTimeout(state.pollTimer);state.polling=true;const id=state.job.id;try{const value=await api("/api/jobs/"+id);if(state.job?.id!==id)return;state.job=value;state.pollErrors=0;renderJob();if(activeJob())queuePoll(document.hidden?15000:state.job.waiting||state.job.paused||state.job.queue_waiting?5000:2000)}catch(error){state.pollErrors++;if(error.status===401||error.status===404||error.message.includes("Không tìm thấy lượt chạy")){state.job.status="error";state.job.error="Phiên chạy không còn trên máy chủ. Kiểm tra kết quả đã lưu trước khi chạy lại.";renderJob()}else{if(state.pollErrors===1)toast("Mất kết nối tiến độ. Công cụ sẽ tự nối lại, không gửi lại yêu cầu chạy.");$("runMeta").textContent="Đang kết nối lại với máy chủ...";queuePoll(Math.min(30000,2000*2**Math.min(4,state.pollErrors)))}}finally{state.polling=false}}
 function secondsLabel(value){return Number(value).toLocaleString("vi-VN",{maximumFractionDigits:2})+" giây"}
-function renderResponseTiming(){const job=state.job,node=$("responseTiming");if(!job||!Number.isFinite(job.last_response_seconds)){node.textContent="";return}const m=job.last_performance||{},name=job.engine==="fast"?"Nhanh":"Tương thích";node.textContent="Lượt vừa xong: "+secondsLabel(job.last_response_seconds)+" · "+name+(job.average_response_seconds?" · TB "+secondsLabel(job.average_response_seconds)+"/lượt":"");node.title=[["load_ms","Tải"],["fill_ms","Điền"],["navigation_ms","Chuyển trang"],["submit_ms","Xác nhận"]].filter(([key])=>Number.isFinite(m[key])).map(([key,label])=>label+": "+secondsLabel(m[key]/1000)).join(" · ")+(Number.isFinite(m.batch_fields)?" · Điền nhanh: "+m.batch_fields+" ô; tương thích: "+(m.fallback_fields||0)+" ô":"")}
+function renderResponseTiming(){const job=state.job,node=$("responseTiming");if(!job||!Number.isFinite(job.last_response_seconds)){node.textContent="";return}const m=job.last_performance||{},name=job.engine==="fast"?"Nhanh":"Tương thích";const parts=["Xử lý: "+secondsLabel(job.last_response_seconds),name];if(Number.isFinite(job.average_response_seconds))parts.push("TB "+secondsLabel(job.average_response_seconds)+"/lượt");if(Number.isFinite(job.last_start_interval_seconds))parts.push("Hai lần bắt đầu: "+secondsLabel(job.last_start_interval_seconds));if(Number.isFinite(job.last_confirmation_interval_seconds))parts.push("Hai xác nhận: "+secondsLabel(job.last_confirmation_interval_seconds));if(job.processing_overrun_seconds>.05&&job.target_interval_seconds>0)parts.push("Xử lý vượt nhịp "+secondsLabel(job.processing_overrun_seconds));if(job.last_schedule_overrun_seconds>.05)parts.push("Chờ quá lịch "+secondsLabel(job.last_schedule_overrun_seconds));node.textContent=parts.join(" · ");node.title=[["load_ms","Tải"],["fill_ms","Điền"],["navigation_ms","Chuyển trang"],["submit_ms","Xác nhận"]].filter(([key])=>Number.isFinite(m[key])).map(([key,label])=>label+": "+secondsLabel(m[key]/1000)).join(" · ")+(Number.isFinite(m.batch_fields)?" · Điền nhanh: "+m.batch_fields+" ô; tương thích: "+(m.fallback_fields||0)+" ô":"")+" · Thời gian xử lý gồm tạo/đóng phiên và kiểm tra hạn mức; không gồm hàng đợi."}
 function renderJob(){const job=state.job;if(!job)return;$("jobPanel").hidden=false;const labels={queued:"ĐANG XẾP HÀNG",running:"ĐANG THỰC HIỆN",stopping:"ĐANG DỪNG",stopped:"ĐÃ DỪNG",completed:"HOÀN TẤT",error:"CẦN KIỂM TRA"};$("jobStatus").textContent=labels[job.status]||job.status;$("jobStatus").className="status-chip "+(activeJob()&&job.paused?"paused":activeJob()&&job.waiting?"waiting":job.status);if(activeJob()&&job.paused)$("jobStatus").textContent="TẠM DỪNG";else if(activeJob()&&job.waiting)$("jobStatus").textContent="ĐANG CHỜ";else if(activeJob()&&job.queue_waiting)$("jobStatus").textContent="ĐANG XẾP HÀNG";$("jobDone").textContent=(job.processed||0).toLocaleString("vi-VN");$("jobTotal").textContent="/ "+(job.total||"∞")+" lượt";const percent=job.total?Math.min(100,(job.processed||0)/job.total*100):0;$("jobBar").classList.toggle("indeterminate",!job.total&&activeJob());$("jobBar").firstElementChild.style.width=percent+"%";$("jobDetail").textContent=job.error|| (job.status==="completed"?(job.mode==="check"?"Đã điền đủ các trang, dừng trước Gửi. Chưa gửi phản hồi.":"Biểu mẫu đã xác nhận "+job.confirmed+" lượt gửi thành công."):job.current_question?("Trang "+job.current_page+" · "+job.current_question):job.status==="stopped"?"Lượt chạy đã dừng.":"Đang chuẩn bị công cụ...");$("jobEvents").innerHTML=(job.events||[]).slice(-6).map(event=>'<div class="event '+escapeHTML(event.level)+'"><span>'+escapeHTML(event.message)+'</span></div>').join("");const events=$("jobEvents");events.scrollTop=events.scrollHeight;$("downloadLog").hidden=!job.log_path;$("downloadLog").href="/api/jobs/"+job.id+"/download";const sav=state.spssAvailable&&job.confirmed>0;$("downloadSpss").hidden=!sav;$("spssNote").hidden=!sav;$("downloadSpss").href="/api/jobs/"+job.id+"/export.sav";$("downloadCsv").hidden=!state.csvAvailable||!job.confirmed;$("downloadCsv").href="/api/jobs/"+job.id+"/export.zip";$("statsPanel").hidden=!job.confirmed;$("pauseButton").hidden=!activeJob();$("pauseButton").disabled=job.status==="stopping";$("pauseButton").textContent=job.pause_requested?"Tiếp tục":"Tạm dừng";$("runMeta").textContent=(job.seed!==null&&job.seed!==undefined?"Seed: "+job.seed+" · ":"")+(job.elapsed_seconds!==undefined?"Đã chạy "+formatDuration(job.elapsed_seconds):"");paintRunTiming();renderResponseTiming();renderSummary()}
 $("formUrl").addEventListener("input",()=>{clearTimeout(urlTimer);cancelCountdown();state.scanToken++;state.armed=false;if(validLink($("formUrl").value.trim()))urlTimer=setTimeout(scanForm,850);else{state.schema=null;state.config={};state.scanning=false;$("questionList").innerHTML=emptyMarkup;$("toolbar").hidden=true;$("academicTools").hidden=true;$("formMeta").hidden=true;$("fieldCount").textContent="0 câu hỏi";status("Dán link Google Forms hoặc Microsoft Forms để bắt đầu.");renderSummary()}});
 $("scanAgain").addEventListener("click",scanForm);
@@ -1795,8 +1836,8 @@ $("searchQuestions").addEventListener("input",filterQuestions);$("pageFilter").a
 $("testButton").addEventListener("click",()=>startJob(true));
 function paintRunTiming(){const job=state.job;if(!job||!activeJob()||job.status==="stopping")return;if(job.paused)$("jobDetail").textContent="Đã tạm dừng. Khi tiếp tục, phản hồi chưa gửi sẽ được điền lại với cùng đáp án.";else if(job.pause_requested)$("jobDetail").textContent="Sẽ tạm dừng ở bước kiểm tra tiếp theo; yêu cầu gửi đang diễn ra có thể hoàn tất.";else if(job.queue_waiting){$("jobDetail").textContent="Đang xếp hàng"+(job.queue_position?" · vị trí "+job.queue_position:"")+". Bạn có thể giữ trang mở hoặc quay lại sau. Chờ hàng đợi không trừ lượt miễn phí."}else if(job.waiting){const seconds=job.next_run_at?Math.max(0,job.next_run_at-Date.now()/1000):job.remaining_seconds;$("jobDetail").textContent="Lượt tiếp theo sau "+formatDuration(seconds)+". Bạn có thể tạm dừng hoặc dừng đợt chạy."}}
 $("pauseButton").addEventListener("click",async()=>{if(!activeJob())return;const action=state.job.pause_requested?"resume":"pause";$("pauseButton").disabled=true;try{state.job=await api("/api/jobs/"+state.job.id+"/"+action,{});renderJob()}catch(error){toast(error.message);$("pauseButton").disabled=false}});
-$("timingPreset").addEventListener("change",()=>{const value=$("timingPreset").value,map={fast:[2,2],fixed3:[3,3],fixed30:[30,30],fixed60:[60,60],random30_180:[30,180],fixed180:[180,180]};if(map[value]){$("intervalMin").value=map[value][0];$("intervalMax").value=map[value][1]}persistRunOptions();renderSummary();scheduleAuto()});
-for(const id of ["engineMode","intervalMin","intervalMax","sampleSeed","referenceDate"])$(id).addEventListener("input",()=>{if(!["engineMode","sampleSeed","referenceDate"].includes(id))$("timingPreset").value=["random30_180","custom_random"].includes($("timingPreset").value)?"custom_random":"custom_fixed";persistRunOptions();renderSummary();scheduleAuto()});
+$("timingPreset").addEventListener("change",()=>{const value=$("timingPreset").value,map={maximum:[0,0],fast:[2,2],fixed3:[3,3],fixed30:[30,30],fixed60:[60,60],random30_180:[30,180],fixed180:[180,180]};if(map[value]){$("intervalMin").value=map[value][0];$("intervalMax").value=map[value][1]}persistRunOptions();renderSummary();scheduleAuto()});
+for(const id of ["engineMode","timingBasis","intervalMin","intervalMax","sampleSeed","referenceDate"])$(id).addEventListener("input",()=>{if(!["engineMode","timingBasis","sampleSeed","referenceDate"].includes(id))$("timingPreset").value=["random30_180","custom_random"].includes($("timingPreset").value)?"custom_random":"custom_fixed";persistRunOptions();renderSummary();scheduleAuto()});
 $("applyPreset").addEventListener("click",async()=>{if(!state.scanId||activeJob())return;cancelCountdown();const scanId=state.scanId,token=state.scanToken,draft=JSON.stringify(state.config);$("applyPreset").disabled=true;try{const value=await api("/api/scans/"+scanId+"/preset",{preset:$("ratioPreset").value,config:JSON.parse(draft)});if(scanId!==state.scanId||token!==state.scanToken)return;if(JSON.stringify(state.config)!==draft){toast("Tỷ lệ đã được sửa trong khi chờ. Hãy áp dụng mẫu lại nếu cần.");return}rememberRates();state.config=value.config;renderQuestions();persistDraft();scheduleAuto();toast("Đã áp dụng mẫu phân phối. Bạn vẫn có thể chỉnh từng câu.")}catch(error){toast(error.message)}finally{renderSummary()}});
 $("loadReport").addEventListener("click",async()=>{if(!state.job?.confirmed)return;const jobId=state.job.id;$("loadReport").disabled=true;try{const report=await api("/api/jobs/"+jobId+"/report");if(state.job?.id!==jobId)return;const f=v=>v===null?"—":Number(v).toLocaleString("vi-VN",{maximumFractionDigits:3});$("reportContent").innerHTML='<p>'+report.confirmed+' phản hồi đã xác nhận · Dữ liệu mô phỏng</p><table class="stats-table"><thead><tr><th>Câu hỏi</th><th>N hợp lệ</th><th>Thiếu</th><th>TB</th><th>SD mẫu</th></tr></thead><tbody>'+report.fields.map(row=>'<tr><td>'+escapeHTML(row.question)+(row.row?' · '+escapeHTML(row.row):'')+'<details><summary>Tần suất đáp án</summary>'+row.frequencies.map(item=>'<p>'+escapeHTML(item.option)+(row.score_map&&row.score_map[item.option]!==undefined?' [mã '+f(row.score_map[item.option])+']':'')+': '+item.count+' ('+f(item.percent)+'%)</p>').join('')+'</details></td><td>'+f(row.valid_n)+'</td><td>'+f(row.missing)+'</td><td>'+f(row.mean)+'</td><td>'+f(row.stddev)+'</td></tr>').join('')+'</tbody></table>'}catch(error){toast(error.message)}finally{$("loadReport").disabled=false}});
 async function downloadResult(event,kind){event.preventDefault();const link=event.currentTarget;if(link.getAttribute("aria-busy")==="true")return;link.setAttribute("aria-busy","true");const jobId=state.job.id,href=link.href;try{const response=await fetch(href);if(!response.ok){let info={};try{info=await response.json()}catch{}throw Error(info.error||"Chưa xuất được dữ liệu.")}const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="KDautoform_"+jobId+"."+kind;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast(kind==="sav"?"Đã tải .sav. Mở trong SPSS bằng File → Open → Data.":"Đã tải CSV, bảng mã và báo cáo trong file ZIP.")}catch(error){toast(error.message)}finally{link.removeAttribute("aria-busy")}}
@@ -2136,6 +2177,7 @@ class WebApplication:
                 self.stop_job(job["id"])
         self.scan_queue.shutdown(wait=wait, cancel_pending=True)
         self.browser_queue.shutdown(wait=wait, cancel_pending=True)
+        self.key_store.close()
 
     def cleanup(self):
         now = time.time()
@@ -2410,6 +2452,7 @@ class WebApplication:
             if job.get("_finished"):
                 return
             job["_executing"] = True
+            job["_turn_started"] = time.monotonic()
             job.update(status="running", queue_waiting=False, waiting=False, next_run_at=None, remaining_seconds=0)
         try:
             if job["control"].stopped or not active_job_key(job, self.key_store):
@@ -2447,7 +2490,7 @@ class WebApplication:
         self._enqueue_job(job, due)
 
     def _run_job(self, job):
-        from run_scheduling import sample_interval
+        from run_scheduling import sample_interval, next_start_deadline
         schema, control, app = job["schema"], job["control"], self
         context = job.get("_execution")
         if context is None:
@@ -2490,8 +2533,12 @@ class WebApplication:
                 validate_answers(schema, answers)
                 return self._prepare(schema, answers)
         checkpoint()
-        started = time.monotonic()
+        started = job.get("_turn_started", time.monotonic())
+        confirmed_at = None
         with self.lock:
+            previous_start = context.get("previous_start")
+            start_interval = round(started - previous_start, 3) if previous_start is not None else None
+            schedule_overrun = round(max(0, started - context.get("next_due", started)), 3) if previous_start is not None else 0
             job.update(current_page=0, current_question="", current_index=index, paused=False)
         self.event(job, f'Bắt đầu lượt {index}.')
         with self._browser(ProgressBrowser, headless=job["headless"]) as browser:
@@ -2511,6 +2558,7 @@ class WebApplication:
                     checkpoint()
                     attempted = True
                     browser.submit(schema)
+                    confirmed_at = time.monotonic()
                 except (WebStopRequested, WebPauseRequested):
                     raise
                 except Exception as exc:
@@ -2524,9 +2572,17 @@ class WebApplication:
                         except FormError:
                             self.event(job, "Chưa hoàn được lượt giữ chỗ chưa gửi. Kiểm tra kết nối kho lượt.", "warning")
                 log.write({"event": "confirmed", "index": index, "report": report})
-            elapsed = max(0, time.monotonic() - started)
             measured = getattr(browser, "metrics", {})
+        completed = time.monotonic()
+        elapsed = max(0, completed - started)
         with self.lock:
+            job["last_start_interval_seconds"] = start_interval
+            job["last_schedule_overrun_seconds"] = schedule_overrun
+            context["previous_start"] = started
+            if confirmed_at is not None:
+                previous_confirmation = context.get("previous_confirmation")
+                job["last_confirmation_interval_seconds"] = round(confirmed_at - previous_confirmation, 3) if previous_confirmation is not None else None
+                context["previous_confirmation"] = confirmed_at
             job["processed"] += 1
             if job["mode"] == "send":
                 job["confirmed"] += 1
@@ -2547,9 +2603,17 @@ class WebApplication:
                         counts[option] = counts.get(option, 0) + 1
             job["last_profile"] = profile
             context.pop("pending", None)
-            context["next_due"] = started + sample_interval(job["schedule"], context["timing_rng"])
+            interval = sample_interval(job["schedule"], context["timing_rng"])
+            job["target_interval_seconds"] = interval
+            job["processing_overrun_seconds"] = round(max(0, elapsed - interval), 3) if job["schedule"].get("basis", "start") == "start" else 0
+            context["next_due"] = next_start_deadline(job["schedule"], started=started, completed=completed, interval=interval)
         log.write({"event": "performance", "index": index, "seconds": round(elapsed, 3),
-                   "metrics": job["last_performance"], "engine": job["engine"]})
+                   "metrics": job["last_performance"], "engine": job["engine"],
+                   "start_interval_seconds": job.get("last_start_interval_seconds"),
+                   "confirmation_interval_seconds": job.get("last_confirmation_interval_seconds"),
+                   "target_interval_seconds": job["target_interval_seconds"],
+                   "processing_overrun_seconds": job["processing_overrun_seconds"],
+                   "schedule_overrun_seconds": job.get("last_schedule_overrun_seconds", 0)})
         self.event(job, f'Lượt {index}: đã điền đủ {report["questions"]} câu qua {report["pages"]} trang. '
                    + ("Biểu mẫu đã xác nhận lưu." if job["mode"] == "send" else "Dừng trước Gửi, chưa gửi phản hồi."), "success")
         with self.lock:
@@ -2720,7 +2784,7 @@ def create_web_server(port=None, force_check=False, host=None, key_store=None):
                     return
                 if path == "/api/state":
                     self.reply(200, {"ok": True, "force_check": app.force_check, "headless_only": app.headless_only,
-                                     "version": "9.2", "max_browser_workers": 10, "name": "KDautoform", "providers": ["google", "microsoft", "html"],
+                                     "version": "9.3", "max_browser_workers": 10, "name": "KDautoform", "providers": ["google", "microsoft", "html"],
                                      "spss_export": spss_available(), "csv_export": True, "scheduling": True,
                                      "teaching_tools": True, "multiuser_queue": True, "browser_workers": app.browser_queue.capacity, "fast_google": True, "compact_poll": True, **self.access_state(session)})
                 elif path.startswith("/api/scans/"):

@@ -44,19 +44,19 @@ Thay các địa chỉ minh họa bằng link form bạn quản lý. `--check` �
 
 ## Tốc độ chạy và tạm dừng
 
-Có hai thiết lập riêng: **cách xử lý từng form** và **nhịp bắt đầu giữa các lượt**.
+Có hai thiết lập riêng: **cách xử lý từng form** và **khoảng cách giữa các lượt**. Bản 9.3 bổ sung cách tính khoảng cách, chế độ không chờ thêm và các số đo thực tế.
 
 ### Cách điền Google Forms
 
-- **Nhanh** là mặc định cho Google Forms: gom thao tác điền trên mỗi trang để giảm số lần trao đổi giữa Python và trình duyệt. Các ô chưa xử lý được bằng đường nhanh sẽ dùng cách điền tương thích.
+- **Nhanh** là mặc định cho Google Forms: gom thao tác điền trên mỗi trang để giảm số lần trao đổi giữa Python và trình duyệt, gồm cả danh sách chọn chuẩn và dropdown ARIA đã xác minh. Các ô chưa xử lý được bằng đường nhanh sẽ dùng cách điền tương thích.
 - **Tương thích** dùng cách điền từng câu như trước, phù hợp khi cần kiểm tra một form có giao diện hoặc điều khiển khác thường.
 - Cả hai cách vẫn kiểm tra cấu trúc, đi qua đủ các trang/nhánh cần thiết và chỉ ghi nhận thành công khi dịch vụ xác nhận. Microsoft Forms và HTML giữ bộ xử lý riêng hiện có.
 
-**Mục tiêu tối ưu là khoảng 2–3 giây cho form Google 4 trang trong điều kiện thuận lợi.** Đây không phải cam kết mọi form đều hoàn tất trong thời gian đó. Tổng thời gian còn gồm tải trang, số lượng và loại câu hỏi, chuyển trang, mạng và chờ Google xác nhận. Đặt nhịp 2 giây không cắt ngắn các bước cần thiết này.
+**Không thể bảo đảm 2 giây cho mọi form Google 5 trang hoặc mọi loại câu hỏi.** Tổng thời gian còn gồm tải trang, số lượng và loại câu hỏi, chuyển trang, mạng và chờ Google xác nhận. Đặt nhịp 2 giây không cắt ngắn các bước cần thiết này.
 
 Sau khi dán link, dùng **Điền thử** để kiểm tra đủ các trang trước. Theo dõi thời gian xử lý thực đo của lượt chạy để đánh giá tốc độ trên chính form và máy chủ của bạn.
 
-Trong **Tốc độ, thời gian chạy & tái tạo dữ liệu**, chọn **Cách điền Google Forms → Nhanh**. Kết quả hiển thị thời gian lượt vừa xong và trung bình, không tính thời gian chờ lịch hoặc tạm dừng. Rê chuột vào dòng thời gian để xem các pha tải, điền, chuyển trang, xác nhận và số ô dùng đường nhanh/tương thích. Nhật ký JSONL lưu sự kiện `performance` với đơn vị pha là mili giây; gói ZIP lưu lựa chọn `engine` trong metadata.
+Trong **Tốc độ, thời gian chạy & tái tạo dữ liệu**, chọn **Cách điền Google Forms → Nhanh**. Muốn chạy nhanh nhất có thể, chọn **Tốc độ yêu cầu → Tối đa · không chờ thêm** (0 giây). Công cụ vẫn điền và xác minh đủ các trang trước khi chạy lượt tiếp theo. Kết quả hiển thị thời gian xử lý lượt vừa xong và trung bình, gồm tạo/đóng phiên, kiểm tra hạn mức và xác nhận; không tính thời gian xếp hàng/chờ lịch. Lần điền bị tạm dừng giữa chừng được làm lại với cùng đáp án, nên số đo lượt thành công chỉ tính lần điền lại đó. Các dòng **Hai lần bắt đầu** và **Hai xác nhận** là khoảng cách thực tế đo giữa hai lượt hoàn tất xử lý liên tiếp, chỉ có từ lượt thứ hai. **Xử lý vượt nhịp** là phần thời gian xử lý lớn hơn nhịp đặt; **Chờ quá lịch** là thời gian được xử lý trễ hơn mốc đủ điều kiện (ví dụ đang chia lượt cho người khác). Rê chuột vào dòng thời gian để xem các pha tải, điền, chuyển trang, xác nhận và số ô dùng đường nhanh/tương thích. Nhật ký JSONL lưu sự kiện `performance` với đơn vị pha là mili giây; gói ZIP lưu lựa chọn `engine` trong metadata.
 
 Dùng Terminal để kiểm tra đường nhanh, dừng trước nút Gửi:
 
@@ -72,21 +72,28 @@ Form mô phỏng 4 trang, 40 câu chữ/trắc nghiệm, chạy trong Docker v�
 
 | Phép đo | Tương thích | Nhanh |
 | --- | ---: | ---: |
-| Tổng chuẩn bị và xác nhận | 3,195 giây | 0,626 giây |
-| Riêng thao tác điền | 2,506 giây | 0,146 giây |
+| Tổng chuẩn bị và xác nhận | 3,506 giây | 0,608 giây |
+| Riêng thao tác điền | 2,835 giây | 0,084 giây |
+
+Form mô phỏng **5 trang/20 câu** gồm chữ, dropdown chuẩn, dropdown ARIA và checkbox mất **0,566 giây**, đi đủ 5 trang, kiểm tra chính xác 20 đáp án và đúng một yêu cầu gửi mô phỏng. Đây là phép đo chi phí xử lý trên máy chủ, không có độ trễ Google.
 
 Đây là phản hồi mạng được mô phỏng cục bộ để so sánh chi phí xử lý, không phải tốc độ gửi đến Google. Cả hai chế độ đi đủ 4 trang, giữ cùng 40 đáp án và chỉ ghi nhận sau xác nhận.
 
-Trên form Google thực tế đã cung cấp (5 trang, 20 câu), một lượt **điền thử, chưa gửi** đo được khoảng **8,30 giây**: tải 1,85 giây, điền 1,35 giây, chuyển trang 4,97 giây. Cả 20 ô dùng đường nhanh. Độ trễ mạng/chuyển trang vẫn chiếm phần lớn thời gian, nên chưa thể khẳng định mọi form 4 trang sẽ xong trong 2–3 giây.
+Trên form Google thực tế đã cung cấp (5 trang, 20 câu), các lần **điền thử, chưa gửi** từng đo được khoảng **5,86–10,58 giây**. Lần 10,58 giây gồm tải 4,37 giây, điền 1,00 giây, chuyển trang 4,60 giây, cả 20 ô dùng đường nhanh. Đây là số đo có mạng thực, khác bài mô phỏng; độ trễ tải/chuyển trang vẫn là phần lớn thời gian.
+
+Bản 9.3 tái sử dụng tối đa 4 kết nối PostgreSQL, giữ giao dịch/quota nguyên tử và không tự chạy lại khi commit chưa rõ kết quả. Phép đo chỉ đọc `SELECT 1` trên CSDL đang cấu hình: mở kết nối mới trung bình 439 ms; dùng lại kết nối 129 ms (mẫu 3 và 7 lần sau khi làm nóng). Đây là chi phí truy vấn/kết nối, không phải tổng thời gian điền form.
+
+Một lượt điền thử tiếp theo không dùng cache tự viết đo được 5,86 giây (tải 1,09 giây, điền 1,26 giây, chuyển trang 2,83 giây). Các con số biến động theo mạng nên không dùng chúng để khẳng định mức tăng tốc cố định. Bản phát hành giữ cơ chế tải của Chromium; HTML, cookie và mã phiên của mỗi phản hồi vẫn được tạo mới.
 
 
-### Chọn nhịp bắt đầu mỗi lượt
+### Chọn tốc độ trên web
 
 Trong phần tốc độ trên web, chọn một cấu hình nhanh hoặc đặt khoảng cách riêng:
 
 | Cấu hình | Cách hoạt động |
 | --- | --- |
-| Nhanh nhất, nhịp 2 giây | Khoảng cách bắt đầu tối thiểu giữa hai lượt là 2 giây; đây là cấu hình mặc định. Không đồng nghĩa thời gian điền chắc chắn là 2 giây. |
+| Tối đa · không chờ thêm | Đặt 0 giây, không thêm khoảng chờ; vẫn chờ form hiện tại hoàn tất và chờ vị trí trong hàng đợi. |
+| Nhịp 2 giây | Khoảng cách bắt đầu tối thiểu giữa hai lượt là 2 giây; đây là cấu hình mặc định. Không đồng nghĩa thời gian điền chắc chắn là 2 giây. |
 | Mỗi 3 giây | Cố định 3 giây giữa các lần bắt đầu. |
 | Mỗi 30 giây | Cố định 30 giây giữa các lần bắt đầu. |
 | Mỗi 1 phút | Cố định 60 giây giữa các lần bắt đầu. |
@@ -94,7 +101,14 @@ Trong phần tốc độ trên web, chọn một cấu hình nhanh hoặc đặt
 | Mỗi 3 phút | Cố định 180 giây giữa các lần bắt đầu. |
 | Tùy chỉnh | Cố định hoặc ngẫu nhiên trong khoảng 0–86.400 giây. |
 
-**Khoảng cách được tính từ lúc bắt đầu lượt trước đến lúc bắt đầu lượt sau.** Mỗi người dùng chạy lần lượt; lượt đầu bắt đầu khi đến vị trí trong hàng đợi: nếu một form mất lâu hơn khoảng cách đã đặt, lượt kế tiếp chờ form đó hoàn tất. Không dồn các lượt của cùng một đợt để bù thời gian bị trễ. Các người dùng khác được chia lượt xử lý theo hàng đợi. Thời gian hoàn thành hiển thị là ước tính; tốc độ mạng và độ dài form có thể làm thời gian thực tế lớn hơn.
+**Cách tính khoảng cách** có hai lựa chọn:
+
+- **Giữa hai lần bắt đầu** (mặc định): đặt 60 giây và form mất 8 giây thì chờ khoảng 52 giây còn lại.
+- **Nghỉ sau khi hoàn tất**: đặt 60 giây và form mất 8 giây thì chờ thêm đủ 60 giây; khoảng cách bắt đầu khoảng 68 giây, cộng thời gian xếp hàng.
+
+Để dùng: dán link → chọn số lượt/tỷ lệ → chọn **Tốc độ yêu cầu** và **Cách tính khoảng cách** → bấm **Bắt đầu**. Muốn khoảng ngẫu nhiên, chọn **Tùy chỉnh · trong khoảng**, nhập Từ/Đến (ví dụ 30–180 giây). Các lựa chọn được giữ khi F5 và bị khóa chỉnh trong lúc chạy; tạm dừng/dừng vẫn dùng được.
+
+ Mỗi người dùng chạy lần lượt; lượt đầu bắt đầu khi đến vị trí trong hàng đợi: nếu một form mất lâu hơn khoảng cách đã đặt, lượt kế tiếp chờ form đó hoàn tất. Không dồn các lượt của cùng một đợt để bù thời gian bị trễ. Các người dùng khác được chia lượt xử lý theo hàng đợi. Trước khi có số đo, giao diện chỉ hiển thị tổng khoảng chờ/nhịp tối thiểu, không gọi đó là tổng thời gian hoàn thành. Sau một lượt, ước tính dùng thời gian xử lý trung bình vừa đo và không tính thời gian chờ người khác.
 
 Ví dụ muốn nhịp **1 phút/form**, chọn cấu hình **1 phút / 60 giây**. Muốn “30 giây–3 phút mới có một phản hồi mới”, chọn cấu hình ngẫu nhiên 30–180 giây. Đây là nhịp bắt đầu lượt; không bảo đảm biểu mẫu dài sẽ hoàn thành trong 30 giây.
 
@@ -531,7 +545,7 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 | Form khác báo chưa hỗ trợ | Chọn đúng chế độ HTML thử nghiệm. Website dùng widget, luồng nhiều trang hoặc cơ chế gửi riêng cần bộ kết nối riêng; không đổi URL lạ thành Google Form. |
 | Không có nút tải SPSS hoặc chưa có lượt xác nhận | Điền thử và lượt chưa rõ kết quả không được xuất thành dữ liệu. Chờ có phản hồi đã xác nhận rồi tải. |
 | Xuất SPSS báo thiếu thư viện | Chạy `python -m pip install -r requirements.txt`; khi cloud dùng Docker, deploy lại image có requirements mới. |
-| Lượt sau bắt đầu chậm hơn khoảng cách đã đặt | Khoảng cách là nhịp bắt đầu; form dài/mạng chậm phải hoàn tất trước khi bắt đầu lượt mới. Xem trạng thái chờ hoặc tạm dừng. |
+| Lượt sau bắt đầu chậm hơn khoảng cách đã đặt | Kiểm tra Cách tính khoảng cách: nghỉ sau hoàn tất cộng thêm thời gian xử lý. Với nhịp bắt đầu, form dài/mạng chậm phải hoàn tất trước; xem số đo Xử lý, Hai lần bắt đầu, Chờ quá lịch và vị trí hàng đợi. |
 | Đã bấm tạm dừng nhưng vẫn có một phản hồi hoàn tất | Yêu cầu mạng đang gửi có thể hoàn tất; công cụ tạm dừng ở điểm kiểm tra tiếp theo. |
 | Xuất SPSS vượt giới hạn | Chia số lượt thành đợt nhỏ hơn; giới hạn xuất bảo vệ RAM và không làm mất hiệu lực key unlimited. |
 | Web khởi động chậm sau khi để lâu | Gói Free đang thức dậy; đợi khởi động xong. |

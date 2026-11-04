@@ -129,7 +129,7 @@ class GoogleSpeedBrowserTests(unittest.TestCase):
         self.assertEqual(result["handled"], ["entry.1","entry.2"], result)
         self.assertEqual(page.locator('[name="entry.1"]').input_value(), "Yes")
 
-    def test_dropdown_readonly_and_unverified_custom_state_use_fallback(self):
+    def test_native_dropdown_is_handled_but_readonly_and_unverified_state_use_fallback(self):
         fields = [self.field(1,"dropdown",["A"]),self.field(2),
                   self.field(3,"single",["A"])]
         html = self.card(1, '<select name="entry.1"><option>A</option></select>')
@@ -137,8 +137,8 @@ class GoogleSpeedBrowserTests(unittest.TestCase):
         html += self.card(3, '<input type=hidden name="entry.3"><div role=radio aria-label=A aria-checked=false onclick="this.setAttribute(\'aria-checked\',\'true\')">A</div>')
         page = self.page(html)
         result = fill_google_page(page, fields, {"entry.1":"A","entry.2":"X","entry.3":"A"})
-        self.assertEqual(result["fallback"], ["entry.1","entry.2","entry.3"])
-        self.assertEqual(result["handled"], [])
+        self.assertEqual(result["fallback"], ["entry.2","entry.3"])
+        self.assertEqual(result["handled"], ["entry.1"])
         self.assertEqual(page.locator('[name="entry.3"]').input_value(), "")
 
     def test_disabled_hydration_waits_once_without_forcing_disabled_state(self):

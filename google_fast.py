@@ -90,13 +90,71 @@ _FILL_PAGE = r"""async ({fields, answers}) => {
  const same=(left,right)=>left.length===right.length&&[...left].sort().every((value,index)=>value===[...right].sort()[index]);
  const dateText=value=>String(value.year).padStart(4,'0')+'-'+String(value.month).padStart(2,'0')+'-'+String(value.day).padStart(2,'0');
  const timeText=value=>String(value.hour).padStart(2,'0')+':'+String(value.minute).padStart(2,'0');
+ const waitUntil=async (predicate,milliseconds)=>{
+   const deadline=performance.now()+milliseconds;
+   do {const value=predicate();if(value)return value;if(performance.now()>=deadline)return null;
+       await new Promise(resolve=>setTimeout(resolve,16));}while(true);
+ };
  const plans=[], failures=[];
  for(const field of fields) {
    try {
      if(!Object.prototype.hasOwnProperty.call(answers,field.id))throw Error('Missing answer');
      const value=answers[field.id],card=cardFor(field);
      if(!card)throw Error('Question card is not unique');
-     if(field.kind==='dropdown')throw Error('Dropdown uses the regular verified UI path');
+     if(field.kind==='dropdown') {
+       const selects=Array.from(card.querySelectorAll('select')).filter(usable);
+       if(selects.length) {
+         if(selects.length!==1||selects[0].multiple||selects[0].name!==field.id||!selects[0].form)
+           throw Error('Native dropdown is not unique or serializable');
+         const select=selects[0],options=Array.from(select.options).filter(option=>!option.disabled&&
+           (!option.parentElement.matches('optgroup')||!option.parentElement.disabled));
+         const matches=options.filter(option=>String(option.value)===String(value)||clean(option.label)===String(value));
+         if(matches.length!==1)throw Error('Native dropdown option is not unique');
+         const option=matches[0];
+         plans.push({field,apply:()=>{
+           Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(select,option.value);
+           select.dispatchEvent(new Event('input',{bubbles:true}));
+           select.dispatchEvent(new Event('change',{bubbles:true}));
+         },verify:()=>visible(select)&&select.selectedOptions.length===1&&select.selectedOptions[0]===option&&
+           same(serialized(field),[String(value)])&&
+           (!select.willValidate||select.validity.valid)});
+         continue;
+       }
+       const boxes=Array.from(card.querySelectorAll('[role="listbox"]')).filter(usable);
+       if(boxes.length!==1)throw Error('Dropdown listbox is not unique');
+       const box=boxes[0],roots=[box,...(box.getAttribute('aria-controls')||box.getAttribute('aria-owns')||'')
+         .split(/\s+/).map(id=>document.getElementById(id)).filter(Boolean)];
+       const options=()=>[...new Set(roots.flatMap(root=>Array.from(root.querySelectorAll('[role="option"]'))))];
+       if(!options().length&&roots.length===1)throw Error('Dropdown popup cannot be safely scoped');
+       let opened=false,chosen=null;
+       const dismiss=()=>{
+         if(!opened)return;
+         box.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));
+         if(box.getAttribute('aria-expanded')==='true')box.click();
+         opened=false;
+       };
+       plans.push({field,cleanup:dismiss,apply:async()=>{
+         box.click();opened=true;
+         const result=await waitUntil(()=>{
+           const matches=options().filter(usable).filter(option=>
+             option.getAttribute('data-value')===String(value)||label(option)===String(value));
+           if(matches.length>1)throw Error('Dropdown option is not unique');
+           return matches.length===1?matches[0]:null;
+         },250);
+         if(!result)throw Error('Dropdown popup is not ready');
+         chosen=result;chosen.click();
+       },verify:()=>{
+         if(!visible(box)||!chosen)return false;
+         // Some Google controllers replace the clicked popup item with a
+         // selected display item. Verify semantic selection after that update.
+         const selected=options().filter(option=>option.getAttribute('aria-selected')==='true');
+         if(!selected.length||selected.some(option=>
+           option.getAttribute('data-value')!==String(value)&&label(option)!==String(value)))return false;
+         if(document.getElementsByName(field.id).length&&!same(serialized(field),[String(value)]))return false;
+         dismiss();return true;
+       }});
+       continue;
+     }
      if(['text','paragraph'].includes(field.kind)) {
        const boxes=Array.from(card.querySelectorAll('input:not([type="hidden"]),textarea')).filter(usable)
          .filter(el=>el instanceof HTMLTextAreaElement||['text','email','tel','url','search','number',''].includes(el.type));
@@ -150,7 +208,8 @@ _FILL_PAGE = r"""async ({fields, answers}) => {
  }
  const applied=[];
  for(const plan of plans) {
-   try {plan.apply();applied.push(plan);}catch(error){failures.push({id:plan.field.id,message:String(error.message||error).slice(0,220)});}
+   try {const result=plan.apply();if(result&&typeof result.then==='function')await result;applied.push(plan);}
+   catch(error){plan.cleanup?.();failures.push({id:plan.field.id,message:String(error.message||error).slice(0,220)});}
  }
  // Google schedules controller updates after the click task. Verify them together
  // as soon as they settle, without repeating clicks or sleeping per question.
@@ -158,12 +217,12 @@ _FILL_PAGE = r"""async ({fields, answers}) => {
  while(pending.size) {
    for(const plan of pending) {
      try {if(plan.verify()){handled.push(plan.field.id);pending.delete(plan);}}
-     catch(error){pending.delete(plan);failures.push({id:plan.field.id,message:String(error.message||error).slice(0,220)});}
+     catch(error){pending.delete(plan);plan.cleanup?.();failures.push({id:plan.field.id,message:String(error.message||error).slice(0,220)});}
    }
    if(!pending.size||performance.now()>=deadline)break;
    await new Promise(resolve=>setTimeout(resolve,16));
  }
- for(const plan of pending)failures.push({id:plan.field.id,message:'The real input or selected state could not be verified'});
+ for(const plan of pending){plan.cleanup?.();failures.push({id:plan.field.id,message:'The real input or selected state could not be verified'});}
  return {handled,errors:failures};
 }"""
 
@@ -187,7 +246,7 @@ def fill_google_page(page, fields, answers):
             const controls=Array.from(document.querySelectorAll(
                 '[role="listitem"] [role="radio"],[role="listitem"] [role="checkbox"],'
                 +'[role="listitem"] input:not([type="hidden"]),[role="listitem"] textarea,'
-                +'[role="listitem"] [role="listbox"]')).filter(visible);
+                +'[role="listitem"] [role="listbox"],[role="listitem"] select')).filter(visible);
             return controls.every(el=>!el.disabled&&el.getAttribute('aria-disabled')!=='true');
         }""", timeout=15000)
         result = page.evaluate(_FILL_PAGE, {"fields": fields, "answers": {identifier: answers[identifier]

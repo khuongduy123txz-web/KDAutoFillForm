@@ -1,4 +1,4 @@
-"""Validated start-to-start pacing and interruptible controls for sequential jobs."""
+"""Validated pacing and interruptible controls for sequential jobs."""
 from __future__ import annotations
 
 import math
@@ -24,14 +24,19 @@ def parse_schedule(payload=None, legacy_delay=2):
     """Normalize a fixed/random interval without accepting booleans or NaN.
 
     Missing schedules preserve the legacy numeric ``delay`` input. Intervals are
-    measured between actual starts, rather than adding another delay after the
-    preceding form has finished. A fixed schedule uses ``min_seconds`` only.
+    measured between actual starts by default. An explicit ``basis`` of
+    ``completion`` instead adds a cooldown after the preceding form finishes.
+    A fixed schedule uses ``min_seconds`` only. Omitted ``basis`` preserves the
+    original public dictionary shape for existing callers.
     """
     if payload is None:
         interval = _seconds(legacy_delay)
         return {"mode": "fixed", "min_seconds": interval, "max_seconds": interval}
     if not isinstance(payload, dict):
         raise ScheduleError("Cấu hình tốc độ gửi phải là một đối tượng hợp lệ.")
+    basis = payload.get("basis", "start")
+    if basis not in ("start", "completion"):
+        raise ScheduleError("Chọn nhịp giữa các lần bắt đầu hoặc thời gian chờ sau khi hoàn tất.")
     mode = payload.get("mode", "fixed")
     if mode not in ("fixed", "random"):
         raise ScheduleError("Chọn tốc độ cố định hoặc ngẫu nhiên trong một khoảng.")
@@ -41,7 +46,29 @@ def parse_schedule(payload=None, legacy_delay=2):
         maximum = minimum
     elif maximum < minimum:
         raise ScheduleError("Khoảng cách lớn nhất phải lớn hơn hoặc bằng khoảng cách nhỏ nhất.")
-    return {"mode": mode, "min_seconds": minimum, "max_seconds": maximum}
+    schedule = {"mode": mode, "min_seconds": minimum, "max_seconds": maximum}
+    if "basis" in payload:
+        schedule["basis"] = basis
+    return schedule
+
+
+def next_start_deadline(schedule, *, started, completed, interval):
+    """Return the next eligible monotonic start without overlapping responses.
+
+    ``interval`` is the already selected fixed or random interval for this turn.
+    A slow response does not accumulate missed starts. Actual admission can be
+    later than this deadline because of another user's work or a paused job.
+    """
+    schedule = parse_schedule(schedule)
+    interval = _seconds(interval)
+    for timestamp in (started, completed):
+        if type(timestamp) not in (int, float) or not math.isfinite(timestamp):
+            raise ScheduleError("Mốc thời gian xử lý lượt không hợp lệ.")
+    if completed < started:
+        raise ScheduleError("Thời điểm hoàn tất không được trước thời điểm bắt đầu.")
+    if schedule.get("basis", "start") == "completion":
+        return completed + interval
+    return max(completed, started + interval)
 
 
 def sample_interval(schedule, rng=None):
@@ -66,6 +93,9 @@ def estimate_duration(count, schedule, seconds_per_response=0):
     schedule = parse_schedule(schedule)
     if count == 0:
         return {"minimum_seconds": None, "maximum_seconds": None}
+    if schedule.get("basis", "start") == "completion":
+        return {"minimum_seconds": count * duration + (count - 1) * schedule["min_seconds"],
+                "maximum_seconds": count * duration + (count - 1) * schedule["max_seconds"]}
     return {"minimum_seconds": duration + (count - 1) * max(duration, schedule["min_seconds"]),
             "maximum_seconds": duration + (count - 1) * max(duration, schedule["max_seconds"])}
 
