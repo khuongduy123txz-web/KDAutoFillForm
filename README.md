@@ -86,6 +86,19 @@ Bản 9.3 tái sử dụng tối đa 4 kết nối PostgreSQL, giữ giao dịch
 Một lượt điền thử tiếp theo không dùng cache tự viết đo được 5,86 giây (tải 1,09 giây, điền 1,26 giây, chuyển trang 2,83 giây). Các con số biến động theo mạng nên không dùng chúng để khẳng định mức tăng tốc cố định. Bản phát hành giữ cơ chế tải của Chromium; HTML, cookie và mã phiên của mỗi phản hồi vẫn được tạo mới.
 
 
+
+### Đo trực tiếp trên Render Free
+
+Bản 9.3 đã được kiểm tra trực tiếp tại https://kdautoform.onrender.com/ bằng chế độ **Điền thử**, cùng form Google 5 trang/20 câu, seed 42, ngày tham chiếu 2026-11-04:
+
+| Điều kiện | Tổng thời gian xử lý thực tế | Điền đủ | Phản hồi đã gửi |
+| --- | ---: | --- | ---: |
+| Lượt đầu sau deploy, gồm khởi động Chromium | 54,304 giây | 5 trang/20 câu | 0 |
+| Lượt tiếp theo, Chromium đã khởi động sẵn | 34,864 giây | 5 trang/20 câu | 0 |
+
+Cả hai lượt dừng trước Gửi, dùng đường nhanh cho cả 20 ô và giữ nguyên 10 lượt miễn phí. Đây là hai mẫu đo trên cấu hình Free hiện tại, không phải cam kết tốc độ cố định. **Mục tiêu 2 giây/form chưa đạt trên Render Free.** Đặt 0 hoặc 2 giây chỉ điều chỉnh thời gian chờ/nhịp bắt đầu; nó không rút ngắn thời gian xử lý bắt buộc. Số đo trên Render bao gồm toàn bộ phần xử lý từ khi worker nhận việc đến lúc đóng phiên, khác các benchmark thao tác có mạng mô phỏng nêu trên.
+
+
 ### Chọn tốc độ trên web
 
 Trong phần tốc độ trên web, chọn một cấu hình nhanh hoặc đặt khoảng cách riêng:
