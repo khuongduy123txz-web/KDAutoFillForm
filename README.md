@@ -292,13 +292,13 @@ Website mở thẳng trang chủ. Mỗi trình duyệt được **10 lượt g�
 - **Đọc form và Điền thử không trừ lượt.** Lỗi xảy ra trước thao tác gửi cũng không trừ lượt.
 - Máy chủ trừ một lượt ngay trước mỗi thao tác gửi tới dịch vụ biểu mẫu. Nếu mất kết nối hoặc chưa xác nhận được kết quả sau khi đã bắt đầu gửi, lượt đó vẫn được tính vì dịch vụ có thể đã lưu phản hồi. Hạn mức dùng chung cho các loại form, không có thêm 10 lượt riêng khi đổi tab. Nếu dừng sau bước giữ chỗ nhưng trước khi bắt đầu gửi, công cụ hoàn lại lượt đó; lỗi kết nối khi hoàn lượt được ghi trong nhật ký.
 - Số lượng gửi miễn phí phải từ 1 đến số lượt còn lại. Số lượng `0` để chạy liên tục chỉ dành cho key unlimited.
-- Hết 10 lượt thì khóa thao tác bắt đầu lượt mới và hiển thị phần mua key. Người dùng vẫn theo dõi lượt đang chạy, dừng và tải nhật ký được.
+- Hết 10 lượt thì khóa thao tác bắt đầu lượt mới và hiển thị phần nhập key. Người dùng vẫn theo dõi lượt đang chạy, dừng và tải nhật ký được.
 - **F5, Ctrl+R, mở lại URL và đăng xuất không đặt lại 10 lượt.** Cookie khách `kd_guest` được lưu tối đa 365 ngày; máy chủ lưu mã băm nhận dạng khách và số lượt đã dùng trong SQLite/PostgreSQL.
 - Key unlimited dùng lại được cho nhiều đợt chạy và nhiều lần mở khóa. Phiên mở khóa kéo dài tối đa 12 giờ và vẫn giữ khi F5. Khi phiên hết hạn, đăng xuất hoặc máy chủ restart/deploy, nhập lại **cùng key** nếu key còn được bật.
 - Đổi key cấp mã khác và làm mã cũ, phiên cũ hết hiệu lực. Khóa hoặc xóa key thu hồi quyền sử dụng ở lần kiểm tra quyền tiếp theo.
 - F5 không tự gửi lại form. Lượt đang chạy tiếp tục trên máy chủ; tải nhật ký trước khi deploy hoặc restart.
 
-Phần mua key hiển thị **“Mua key unlimited lần giá 30k/1key”**. Liên hệ trực tiếp [Zalo 0343415673](https://zalo.me/0343415673) hoặc [Facebook Khương Duy](https://www.facebook.com/khuong.duy.081207/). Chủ công cụ nhận yêu cầu và cấp key bằng Terminal. Website chưa có thanh toán hoặc xác nhận mua hàng tự động.
+Sau khi dùng hết 10 lượt miễn phí, người dùng cần nhập key được cấp để tiếp tục. Liên hệ trực tiếp [Zalo 0343415673](https://zalo.me/0343415673) hoặc [Facebook Khương Duy](https://www.facebook.com/khuong.duy.081207/) để nhận key. Chủ công cụ tạo key bằng Terminal. Website không niêm yết giá key.
 
 **Hạn mức miễn phí được tính theo nhận dạng trình duyệt, không phải theo một người.** Xóa cookie, dùng chế độ riêng tư hoặc đổi trình duyệt có thể tạo nhận dạng mới. Muốn giới hạn chắc chắn theo từng người cần thêm cơ chế tài khoản hoặc xác minh danh tính.
 
@@ -363,7 +363,7 @@ KD_KEY_EXPORT_DIR=D:/KDautoform/private_keys
 
 Trong `google_form_tool.py`, tìm comment **HẠN MỨC MIỄN PHÍ** và dòng `FREE_LIMIT = 10` để đổi số lượt miễn phí. Khi đổi hạn mức, cập nhật cả các nhãn giới thiệu đang ghi “10 lượt” trong HTML và README để nội dung khớp với cấu hình. Hạn mức được máy chủ kiểm tra; không chỉ dựa vào ô số lượng trên giao diện.
 
-Tìm comment **MUA KEY** trong phần HTML nhúng để sửa nội dung giá `30.000đ/key` và các đường dẫn Facebook/Zalo. Đây là nội dung giới thiệu, không tự tạo key hoặc xác nhận thanh toán.
+Tìm comment **LIÊN HỆ NHẬN KEY** trong phần HTML nhúng để sửa nội dung hướng dẫn nhận key và các đường dẫn Facebook/Zalo. Key được tạo bằng các lệnh quản lý trong Terminal.
 
 Hàm `KeyStore.activate` kiểm tra key unlimited còn được bật; hàm `KeyStore.claim` ghi nhận đợt chạy gần nhất. Các thao tác này không tiêu thụ key unlimited.
 
@@ -399,7 +399,7 @@ Các lệnh không chỉnh source và **không cần git push/redeploy**, miễn
 2. Dán link form được phép kiểm thử, chọn số lượt trong hạn mức và điều chỉnh tỷ lệ từng câu hỏi.
 3. Bấm **Điền thử** nếu cần; thao tác này chưa gửi và không trừ lượt miễn phí.
 4. Bắt đầu gửi thật. Số lượt miễn phí giảm trước mỗi thao tác gửi. Hoàn tất thì tải nhật ký.
-5. Khi hết lượt, bấm liên hệ Facebook/Zalo trong phần mua key unlimited giá **30.000đ/key**.
+5. Khi hết lượt, nhập key đã được cấp hoặc liên hệ Facebook/Zalo để nhận key.
 6. Chủ công cụ chạy `python google_form_tool.py --key-generate`, sao chép mã `KD-...` từ Terminal hoặc CSV và gửi cho khách.
 7. Khách nhập key vào phần mở khóa trên website. Có thể chạy nhiều đợt và dùng số lượng `0` để chạy liên tục đến khi dừng.
 8. Giữ key để mở khóa lại khi phiên hết hạn hoặc máy chủ khởi động lại. F5 vẫn giữ phiên hiện tại và không tiêu thụ key.
@@ -522,7 +522,7 @@ Mở http://localhost:8766. Dừng bằng Ctrl+C hoặc `docker stop kdautoform-
 | `No open ports detected` | Kiểm tra CMD không bị ghi đè, `KD_HOST=0.0.0.0`, `PORT` hợp lệ. Log cần có dòng đang lắng nghe. |
 | `Thiếu URL công khai` | Đặt `KD_PUBLIC_URL` bằng URL HTTPS service nếu nền tảng không cấp `RENDER_EXTERNAL_URL`. |
 | `Phiên truy cập không hợp lệ` | Tải lại trang; kiểm tra `KD_PUBLIC_URL`/`KD_ALLOWED_ORIGINS` khớp chính xác thanh địa chỉ, gồm cả HTTPS. |
-| Hết 10 lượt miễn phí | Mua key unlimited giá 30.000đ/key qua Facebook/Zalo và nhập vào phần mở khóa. F5 không khôi phục lượt miễn phí. |
+| Hết 10 lượt miễn phí | Nhập key được cấp để tiếp tục; có thể liên hệ Facebook/Zalo để nhận key. F5 không khôi phục lượt miễn phí. |
 | Key không đúng hoặc đã bị khóa | Dùng chuỗi `KD-...`; kiểm tra `UNLIMITED` và trạng thái khóa bằng `--key-list`. Terminal và Render phải dùng cùng PostgreSQL. Key cũ đã tiêu thụ cần `--key-rotate` để cấp mã unlimited mới. |
 | F5 vẫn hiện giao diện yêu cầu key của bản cũ | Kiểm tra Render đã deploy thành công commit mới. Bản mới luôn vào trang chủ, giữ số lượt miễn phí và giữ phiên unlimited còn hạn. Sau restart hoặc hết phiên, nhập lại cùng key. |
 | Cloud cần KD_DATABASE_URL | Thêm chuỗi PostgreSQL vào Render Environment; không dùng SQLite tạm trên Render Free. |
