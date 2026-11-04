@@ -128,6 +128,17 @@ class TimingInterfaceTests(unittest.TestCase):
         self.assertGreater(state["last_start_interval_seconds"], 0)
         self.assertGreater(state["last_confirmation_interval_seconds"], 0)
         self.assertFalse(page.locator("#timingPreset").is_disabled())
+        estimate = page.locator("#durationEstimate")
+        self.assertIn("Ước tính theo tốc độ vừa đo:", estimate.inner_text())
+        # Changing only the engine must discard the previous engine's ETA.
+        page.locator("#engineMode").select_option("compatible")
+        self.assertIn("Tổng khoảng chờ/nhịp tối thiểu:", estimate.inner_text())
+        # A new scan must also discard that ETA, even after the engine matches.
+        page.evaluate("state.scanId = 'another-form-scan'; updateRunOptions()")
+        page.locator("#engineMode").select_option("fast")
+        self.assertIn("Tổng khoảng chờ/nhịp tối thiểu:", estimate.inner_text())
+        page.evaluate("state.scanId = state.job.scan_id; updateRunOptions()")
+        self.assertIn("Ước tính theo tốc độ vừa đo:", estimate.inner_text())
         page.set_viewport_size({"width": 390, "height": 844})
         page.locator("#jobPanel").scroll_into_view_if_needed()
         page.wait_for_timeout(150)
