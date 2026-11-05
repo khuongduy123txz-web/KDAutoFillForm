@@ -123,6 +123,8 @@ Bản 9.3 đã được kiểm tra trực tiếp tại https://kdautoform.onrend
 Cả hai lượt dừng trước Gửi, dùng đường nhanh cho cả 20 ô và giữ nguyên 10 lượt miễn phí. Đây là hai mẫu đo trên cấu hình Free hiện tại, không phải cam kết tốc độ cố định. **Mục tiêu 2 giây/form chưa đạt trên Render Free.** Đặt 0 hoặc 2 giây chỉ điều chỉnh thời gian chờ/nhịp bắt đầu; nó không rút ngắn thời gian xử lý bắt buộc. Số đo trên Render bao gồm toàn bộ phần xử lý từ khi worker nhận việc đến lúc đóng phiên, khác các benchmark thao tác có mạng mô phỏng nêu trên.
 
 
+**Kiểm tra bản 9.4 ngày 2026-11-05:** cùng link, seed 42 và ngày tham chiếu 2026-11-04, hai lượt Điền thử trên Render Free hoàn tất đủ 5 trang/20 câu, lần lượt **38,022 giây** và **30,450 giây**. Cả 20 ô dùng đường nhanh, không có fallback; chưa gửi phản hồi và vẫn còn 10 lượt miễn phí. Các lần đo bản 9.3 và 9.4 diễn ra khác thời điểm, nên không suy ra một tỷ lệ tăng tốc cố định cho mạng thực. Mục tiêu 2 giây/form vẫn chưa đạt.
+
 ### Chọn tốc độ trên web
 
 Trong phần tốc độ trên web, chọn một cấu hình nhanh hoặc đặt khoảng cách riêng:
