@@ -3,7 +3,7 @@ import time
 import unittest
 from concurrent.futures import CancelledError
 
-from work_queue import FairWorkQueue, TaskDispatcher
+from work_queue import TaskDispatcher
 
 
 class DispatcherTests(unittest.TestCase):
@@ -217,70 +217,6 @@ class DispatcherTests(unittest.TestCase):
                 queue.submit("invalid",lambda: None,delay=value)
         with self.assertRaises(ValueError):
             queue.submit("invalid",lambda: None,delay=1,due_monotonic=time.monotonic())
-
-
-class FairSlotTests(unittest.TestCase):
-    def test_exception_releases_resource_and_cancelled_waiter_does_not_block_tail(self):
-        queue = FairWorkQueue(1,poll_seconds=.01)
-        entered, first_release, waiting = threading.Event(),threading.Event(),threading.Event()
-        self.addCleanup(first_release.set)
-        seen, errors = [], []
-        def first():
-            try:
-                with queue.acquire("first"):
-                    entered.set()
-                    first_release.wait(2)
-                    raise RuntimeError("expected")
-            except RuntimeError:
-                pass
-        def second():
-            try:
-                with queue.acquire("second",on_state=lambda state: waiting.set()):
-                    seen.append("second")
-            except CancelledError:
-                errors.append("cancelled")
-        def third():
-            with queue.acquire("third"):
-                seen.append("third")
-        a=threading.Thread(target=first)
-        b=threading.Thread(target=second)
-        c=threading.Thread(target=third)
-        for thread in (a,b,c):
-            self.addCleanup(lambda thread=thread: thread.join(timeout=2))
-        a.start()
-        self.assertTrue(entered.wait(1))
-        b.start()
-        self.assertTrue(waiting.wait(1))
-        c.start()
-        self.assertTrue(queue.cancel("second"))
-        first_release.set()
-        for thread in (a,b,c):
-            thread.join(timeout=1)
-            self.assertFalse(thread.is_alive())
-        self.assertEqual(seen,["third"])
-        self.assertEqual(errors,["cancelled"])
-        self.assertEqual(queue.snapshot()["running"],0)
-
-    def test_paused_waiter_leaves_queue_and_rejoins_after_resume(self):
-        queue = FairWorkQueue(1,poll_seconds=.01)
-        paused, entered = threading.Event(),threading.Event()
-        paused.set()
-        seen=[]
-        def paused_work():
-            with queue.acquire("paused",paused=paused.is_set,on_state=lambda state:entered.set()):
-                seen.append("paused")
-        thread=threading.Thread(target=paused_work)
-        thread.start()
-        self.addCleanup(lambda:thread.join(timeout=1))
-        self.addCleanup(paused.clear)
-        self.assertTrue(entered.wait(1))
-        with queue.acquire("other"):
-            seen.append("other")
-        paused.clear()
-        queue.notify()
-        thread.join(timeout=1)
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(seen,["other","paused"])
 
 
 if __name__ == "__main__":

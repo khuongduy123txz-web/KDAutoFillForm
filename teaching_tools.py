@@ -235,7 +235,7 @@ def export_csv_bundle(schema, log_path, output_path, *, max_rows=MAX_ROWS, max_l
                 for event in _log_events(log_path, max_log_bytes):
                     kind, index = event.get("event"), event.get("index")
                     if kind == "run" and not header:
-                        header = {key: event[key] for key in ("seed", "schedule", "provider", "count", "mode", "reference_date", "engine") if key in event}
+                        header = {key: event[key] for key in ("seed", "schedule", "provider", "count", "mode", "reference_date", "engine", "sampler_version") if key in event}
                         continue
                     if kind not in ("filled", "confirmed", "unconfirmed"):
                         continue

@@ -18,7 +18,7 @@ RUN pip install -r requirements.txt \
     && useradd --create-home --uid 10001 appuser \
     && chmod -R a+rX /ms-playwright
 
-COPY --chown=appuser:appuser google_form_tool.py google_fast.py form_scanning.py work_queue.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py database_pool.py ./
+COPY --chown=appuser:appuser google_form_tool.py google_fast.py google_fast.js web_ui.html form_scanning.py work_queue.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py database_pool.py ./
 USER appuser
 EXPOSE 10000
 ENTRYPOINT ["/usr/bin/tini", "--"]

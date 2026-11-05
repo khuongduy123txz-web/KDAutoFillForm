@@ -46,6 +46,30 @@ Thay các địa chỉ minh họa bằng link form bạn quản lý. `--check` �
 
 Có hai thiết lập riêng: **cách xử lý từng form** và **khoảng cách giữa các lượt**. Bản 9.3 bổ sung cách tính khoảng cách, chế độ không chờ thêm và các số đo thực tế.
 
+
+### Bản 9.4: giảm công việc lặp
+
+- Nhóm câu hỏi theo trang một lần, thay vì quét toàn bộ câu hỏi ở mỗi trang.
+- Mỗi trang Google dùng một lần gọi để chờ điều khiển sẵn sàng, điền, kiểm tra email và đọc trạng thái điều hướng. Nút Tiếp/Gửi vẫn có điểm kiểm tra tạm dừng và hạn mức riêng.
+- Lập chỉ mục câu hỏi/đáp án; bỏ vòng so sánh từng cặp điều khiển. So sánh tập đáp án dùng bộ đếm tuyến tính.
+- Mỗi phản hồi web sinh đáp án đúng một lần và một hồ sơ; nội dung cố định không gọi bộ sinh văn bản. Mẫu hồ sơ, nhóm và trọng số được chuẩn bị một lần cho đợt chạy.
+- Xóa hàng đợi cũ không còn dùng; giữ một bộ `TaskDispatcher` cho giới hạn worker và FIFO.
+
+`google_form_tool.py` chứa backend/CLI; `web_ui.html` chứa giao diện; `google_fast.py` là cầu nối Python và `google_fast.js` chứa thao tác trình duyệt. Khi copy/deploy phải giữ đủ các file này. Dockerfile và .dockerignore đã đóng gói cả hai tài nguyên mới.
+
+A/B cùng trình duyệt và fixture cục bộ, median 3 lần (chỉ phần điền, không có độ trễ Google):
+
+| Fixture | Bản trước | Bản mới |
+| --- | ---: | ---: |
+| 100 ô chữ có tên | 38,49 ms | 18,56 ms |
+| 500 ô chữ tìm theo tiêu đề | 165,78 ms | 66,81 ms |
+| 500 checkbox chuẩn | 93,72 ms | 26,73 ms |
+| 250 checkbox ARIA | 88,71 ms | 26,76 ms |
+
+Đo toàn bộ bước điền thử form mô phỏng 4 trang/40 câu trên cùng Chromium (median 3 lần, không Gửi): **197,42 ms → 145,42 ms**. Số lần trao đổi SDK, gồm cả đọc kết quả chờ chuyển trang, giảm **28 → 15**. Mỗi lần vẫn dùng context mới và kiểm tra đúng đủ 40 đáp án.
+
+Các số đo này xác nhận giảm chi phí xử lý; không phải thời gian hoàn tất form trên Render. Số đo Render bên dưới thuộc bản 9.3.
+
 ### Cách điền Google Forms
 
 - **Nhanh** là mặc định cho Google Forms: gom thao tác điền trên mỗi trang để giảm số lần trao đổi giữa Python và trình duyệt, gồm cả danh sách chọn chuẩn và dropdown ARIA đã xác minh. Các ô chưa xử lý được bằng đường nhanh sẽ dùng cách điền tương thích.
@@ -192,6 +216,8 @@ Sau khi đọc form, có thể chọn một mẫu phân bổ nhanh:
 
 Các mẫu giữ cấu hình câu chữ, thông tin nhân khẩu học và câu chọn nhiều; công cụ chỉ chỉnh những câu phù hợp với mẫu đó. Bạn vẫn sửa từng tỷ lệ, dùng nút ngẫu nhiên và hoàn tác như trước. Mẫu phân bổ là cấu hình để thực hành, không phải kết quả kiểm định Cronbach's Alpha, EFA hay ý nghĩa thống kê được bảo đảm.
 
+**Tương thích seed:** Bản 9.4 dùng bộ sinh web `web-2` để bỏ các đáp án/hồ sơ sinh thừa. Cùng seed có thể cho dữ liệu khác bản 9.3; muốn tái lập dữ liệu cũ cần dùng đúng phiên bản code cũ. Nhật ký và `metadata.json → source.sampler_version` ghi phiên bản bộ sinh mới; CLI giữ luồng seed cũ.
+
 Ô **seed** giúp tái tạo việc sinh câu trả lời: để trống để lấy seed ngẫu nhiên, hoặc nhập số nguyên từ `0` đến `9007199254740991`. Cùng seed, cấu trúc form, cấu hình và ngày tham chiếu giúp tạo lại cùng bộ câu trả lời mô phỏng. Seed không cố định thời điểm mạng, dấu thời gian của dịch vụ hoặc trạng thái CAPTCHA; form đã thay đổi cũng có thể cho kết quả khác.
 
 **Ngày tham chiếu** là ngày dùng để tạo hồ sơ, tính tuổi và chọn các giá trị ngày liên quan. Mặc định dùng ngày hiện tại theo trình duyệt; có thể chọn lại theo định dạng `YYYY-MM-DD` để tái tạo một buổi thực hành trước. Seed và ngày tham chiếu được giữ trong nhật ký và metadata của gói ZIP. Khi muốn so sánh hai lần chạy, giữ cả hai giá trị cùng cấu hình và cấu trúc form.
@@ -250,7 +276,7 @@ Repository đã có remote `origin` và nhánh `main`:
 ```powershell
 cd C:\Users\DELL\Desktop\toolggform
 git status --short
-git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py google_fast.py form_scanning.py work_queue.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py tests/test_deployment.py tests/test_keys.py tests/test_google_regression.py tests/test_google_speed.py tests/test_form_scanning.py tests/test_work_queue.py tests/test_multiuser.py tests/test_multiuser_browser.py tests/test_ten_users.py tests/test_ten_users_browser.py tests/test_microsoft_forms.py tests/test_html_forms.py tests/test_spss_export.py tests/test_provider_exports.py tests/test_performance.py tests/test_run_scheduling.py tests/test_teaching_tools.py tests/test_workflow.py
+git add .gitignore .dockerignore .env.example Dockerfile requirements.txt render.yaml README.md google_form_tool.py google_fast.py google_fast.js web_ui.html database_pool.py form_scanning.py work_queue.py microsoft_forms.py html_forms.py spss_export.py run_scheduling.py teaching_tools.py tests
 git commit -m "Support isolated multi-user scans and fair response queues"
 git push origin main
 ```
@@ -388,7 +414,7 @@ KD_KEY_DB_PATH=D:/KDautoform/data/access_keys.sqlite3
 KD_KEY_EXPORT_DIR=D:/KDautoform/private_keys
 ```
 
-Trong `google_form_tool.py`, tìm comment **HẠN MỨC MIỄN PHÍ** và dòng `FREE_LIMIT = 10` để đổi số lượt miễn phí. Khi đổi hạn mức, cập nhật cả các nhãn giới thiệu đang ghi “10 lượt” trong HTML và README để nội dung khớp với cấu hình. Hạn mức được máy chủ kiểm tra; không chỉ dựa vào ô số lượng trên giao diện.
+Trong `google_form_tool.py`, tìm comment **HẠN MỨC MIỄN PHÍ** và dòng `FREE_LIMIT = 10` để đổi số lượt miễn phí. Khi đổi hạn mức, cập nhật cả các nhãn giới thiệu đang ghi “10 lượt” trong `web_ui.html` và README để nội dung khớp với cấu hình. Hạn mức được máy chủ kiểm tra; không chỉ dựa vào ô số lượng trên giao diện.
 
 Tìm comment **LIÊN HỆ NHẬN KEY** trong phần HTML nhúng để sửa nội dung hướng dẫn nhận key và các đường dẫn Facebook/Zalo. Key được tạo bằng các lệnh quản lý trong Terminal.
 

@@ -141,7 +141,8 @@ class CsvBundleTests(unittest.TestCase):
         self.log.write_text("".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events) + tail, encoding="utf-8")
 
     def test_streams_200_confirmed_rows_with_labels_missing_branch_and_safe_excel_text(self):
-        events = [{"event": "run", "seed": 42, "schedule": {"mode": "random", "min_seconds": 30, "max_seconds": 180}}]
+        events = [{"event": "run", "seed": 42, "sampler_version": "web-2",
+                   "schedule": {"mode": "random", "min_seconds": 30, "max_seconds": 180}}]
         for index in range(1, 201):
             events += [self.filled(index), {"event": "confirmed", "index": index}]
         events += [self.filled(201), {"event": "unconfirmed", "index": 201}, self.filled(202),
@@ -168,6 +169,7 @@ class CsvBundleTests(unittest.TestCase):
             metadata = json.loads(archive.read("metadata.json"))
             self.assertTrue(metadata["synthetic"])
             self.assertEqual(metadata["source"]["seed"], 42)
+            self.assertEqual(metadata["source"]["sampler_version"], "web-2")
             self.assertEqual(metadata["source"]["schedule"]["min_seconds"], 30)
 
     def test_preview_only_missing_confirmation_and_size_limits_preserve_existing_file(self):

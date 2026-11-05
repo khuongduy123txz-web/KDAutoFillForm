@@ -9,6 +9,8 @@
 !run_scheduling.py
 !teaching_tools.py
 !google_fast.py
+!google_fast.js
+!web_ui.html
 !form_scanning.py
 !work_queue.py
 !database_pool.py

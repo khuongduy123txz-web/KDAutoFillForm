@@ -1,4 +1,4 @@
-"""Fair, bounded workers and cancellable resource slots for multi-user form work.
+"""Fair, bounded workers for multi-user form work.
 
 Queue entries contain callbacks and metadata only. TaskDispatcher owns a fixed
 number of daemon threads; enqueueing another visitor never starts another worker.
@@ -8,9 +8,8 @@ application's database layer.
 """
 from __future__ import annotations
 
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from concurrent.futures import CancelledError, Future
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 import logging
 import math
@@ -262,122 +261,3 @@ class TaskDispatcher:
 
     def __exit__(self, *args):
         self.shutdown()
-
-
-@dataclass(eq=False)
-class _Ticket:
-    token: str
-    cancelled: bool = False
-
-
-class FairWorkQueue:
-    """Manual FIFO resource slots for existing worker code.
-
-    Unlike TaskDispatcher, this primitive does not own threads. Scheduled waits
-    should happen before entering acquire. Paused waiters temporarily leave the
-    queue and rejoin at its tail on resume; they never block other visitors.
-    """
-
-    def __init__(self, capacity=1, *, poll_seconds=.25):
-        self.capacity = _capacity(capacity)
-        self.poll_seconds = _seconds(poll_seconds)
-        if not 0 < self.poll_seconds <= 2:
-            raise ValueError("Queue poll interval must be greater than zero and at most two seconds.")
-        self._condition = threading.Condition()
-        self._pending = deque()
-        self._registered = {}
-        self._active = {}
-        self._closed = False
-
-    def snapshot(self, token=None):
-        with self._condition:
-            active = token in self._active if token is not None else False
-            position = 0 if active else next((index for index, ticket in enumerate(self._pending, 1)
-                                             if ticket.token == token), None)
-            return {"capacity": self.capacity, "running": len(self._active),
-                    "waiting": len(self._pending), "queue_position": position,
-                    "queued": any(ticket.token == token for ticket in self._pending),
-                    "active": active}
-
-    def notify(self):
-        with self._condition:
-            self._condition.notify_all()
-
-    wake = notify
-
-    def cancel(self, token):
-        with self._condition:
-            ticket = self._registered.get(token)
-            if ticket is None:
-                return False
-            ticket.cancelled = True
-            if ticket in self._pending:
-                self._pending.remove(ticket)
-            self._condition.notify_all()
-            return True
-
-    @contextmanager
-    def acquire(self, token, *, stop_event=None, paused=None, checkpoint=None, on_state=None):
-        token = _token(token)
-        # The ordinary RunControl checkpoint may wait through a pause. Execute
-        # it before registering any queue position or reserving browser capacity.
-        if checkpoint is not None and checkpoint() is False:
-            raise CancelledError("Work stopped before queue admission.")
-        ticket = _Ticket(token)
-        with self._condition:
-            if self._closed:
-                raise RuntimeError("The resource queue is closed.")
-            if token in self._registered:
-                raise ValueError("This work token already owns or awaits a slot.")
-            self._registered[token] = ticket
-            self._pending.append(ticket)
-            self._condition.notify_all()
-        previous_state = None
-        acquired = False
-        try:
-            while not acquired:
-                if stop_event is not None and stop_event.is_set():
-                    raise CancelledError("Queued work stopped.")
-                is_paused = bool(paused and paused())
-                with self._condition:
-                    if self._closed or ticket.cancelled:
-                        raise CancelledError("Queued work cancelled.")
-                    if is_paused:
-                        if ticket in self._pending:
-                            self._pending.remove(ticket)
-                            self._condition.notify_all()
-                    else:
-                        if ticket not in self._pending:
-                            self._pending.append(ticket)
-                        if len(self._active) < self.capacity and self._pending[0] is ticket:
-                            self._pending.popleft()
-                            self._active[token] = ticket
-                            acquired = True
-                            self._condition.notify_all()
-                state = self.snapshot(token)
-                if on_state is not None and state != previous_state:
-                    previous_state = state
-                    on_state(state)
-                if acquired:
-                    break
-                if is_paused and checkpoint is not None:
-                    if checkpoint() is False:
-                        raise CancelledError("Queued work stopped while paused.")
-                    continue
-                with self._condition:
-                    self._condition.wait(self.poll_seconds)
-            yield self.snapshot(token)
-        finally:
-            with self._condition:
-                if ticket in self._pending:
-                    self._pending.remove(ticket)
-                if self._active.get(token) is ticket:
-                    self._active.pop(token)
-                if self._registered.get(token) is ticket:
-                    self._registered.pop(token)
-                self._condition.notify_all()
-
-    def shutdown(self):
-        with self._condition:
-            self._closed = True
-            self._condition.notify_all()

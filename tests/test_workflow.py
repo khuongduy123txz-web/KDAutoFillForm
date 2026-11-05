@@ -149,6 +149,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(state["last_performance"]["fill_ms"], 1.25)
             events = self.logs[job["log_path"]]
             self.assertEqual(events[0]["engine"], engine)
+            self.assertEqual(events[0]["sampler_version"], tool.WEB_SAMPLER_VERSION)
             performance = [event for event in events if event["event"] == "performance"]
             self.assertEqual(len(performance), 1)
             self.assertEqual(performance[0]["seconds"], state["last_response_seconds"])
